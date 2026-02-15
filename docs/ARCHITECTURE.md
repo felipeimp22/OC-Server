@@ -1,0 +1,160 @@
+# Architecture
+
+## System Overview
+
+```
+┌──────────────────────┐      ┌──────────────────────┐
+│    oc-webapp (Next)   │      │  oc-server (Express)  │
+│   (Frontend + Auth)   │      │   (Orders/Payments)   │
+└──────────┬───────────┘      └──────────┬───────────┘
+           │ JWT                          │ Kafka Events
+           ▼                              ▼
+┌──────────────────────────────────────────────────────┐
+│                    oc-crm-engine                      │
+│                  (This Service)                       │
+│                                                       │
+│  ┌─────────┐  ┌──────────┐  ┌──────────┐  ┌───────┐ │
+│  │ Fastify  │  │  Kafka   │  │  BullMQ  │  │ Cron  │ │
+│  │  API     │  │ Consumer │  │  Worker  │  │ Jobs  │ │
+│  └────┬─────┘  └────┬─────┘  └────┬─────┘  └──┬────┘ │
+│       │             │              │            │      │
+│       └──────┬──────┴──────┬───────┘            │      │
+│              ▼             ▼                    ▼      │
+│        ┌──────────┐  ┌──────────┐  ┌──────────────┐  │
+│        │ Services │  │  Flow    │  │  Schedulers   │  │
+│        │          │  │  Engine  │  │               │  │
+│        └────┬─────┘  └────┬─────┘  └──────────────┘  │
+│             └──────┬──────┘                            │
+│                    ▼                                   │
+│           ┌───────────────┐                            │
+│           │ Repositories  │                            │
+│           │ (MongoDB)     │                            │
+│           └───────────────┘                            │
+└──────────────────────────────────────────────────────┘
+```
+
+## Data Flow
+
+### Event Processing Pipeline
+
+1. **Event arrives** via Kafka (order_completed, customer_created, etc.)
+2. **Consumer** deserializes and validates the event payload
+3. **Idempotency guard** checks if event was already processed (ProcessedEvent collection)
+4. **Contact resolution** — find or create the CRM contact for this customer
+5. **Trigger evaluation** — find all active flows whose trigger matches the event
+6. **Flow enrollment** — create a FlowExecution for each matching flow
+7. **Node processing** — the Flow Engine traverses the DAG node by node:
+   - **Trigger**: Already matched, advance to next node
+   - **Action**: Execute via ActionService (send email, apply tag, etc.)
+   - **Condition**: Evaluate via ConditionService, choose branch
+   - **Timer**: Schedule via BullMQ, pause execution until timer fires
+   - **Logic**: Handle branching (A/B split, loop, stop, etc.)
+8. **Completion** — when no more downstream nodes, mark execution as completed
+
+### Timer Flow
+
+```
+Timer Node Hit → BullMQ Job Created → [delay/schedule] → Worker Picks Up → Resume Flow
+```
+
+Timer types:
+- **Delay**: Fixed wait (5 minutes, 2 hours, 3 days)
+- **Schedule**: Wait until specific time/day (e.g., "next Tuesday at 10am")
+- **Date**: Relative to a contact date field (e.g., "birthday - 1 day")
+
+## Multi-Tenancy
+
+Every data operation includes `restaurantId` as a mandatory filter:
+
+```typescript
+// BaseRepository enforces isolation on every query
+async findById(restaurantId, id): Promise<T | null> {
+  return this.model.findOne({ _id: id, restaurantId }).exec();
+}
+```
+
+No cross-tenant data access is possible. The tenancy middleware extracts `restaurantId` from the `X-Restaurant-Id` header and verifies the JWT user has access.
+
+## Authentication
+
+1. Frontend sends JWT from NextAuth v5 in `Authorization: Bearer <token>`
+2. The `auth` middleware verifies using `jose` with the shared `AUTH_SECRET`
+3. The `tenancy` middleware validates `X-Restaurant-Id` against the user's restaurant access (via `UserRestaurant` collection)
+
+## Database Strategy
+
+### Shared Collections (Read-Only)
+The CRM reads from existing OrderChop collections without modifying them:
+- `restaurants`, `customers`, `orders`
+- `store_hours`, `financial_settings`
+- `user_restaurants`, `role_permissions`
+
+### CRM-Owned Collections
+Prefixed with `crm_` to avoid collisions:
+- `crm_contacts`, `crm_tags`, `crm_custom_fields`
+- `crm_flows`, `crm_flow_executions`, `crm_flow_execution_logs`
+- `crm_communication_templates`, `crm_communication_logs`
+- `crm_link_tracking`, `crm_review_requests`
+- `crm_campaigns`, `crm_tasks`, `crm_processed_events`
+
+## Flow Engine — DAG Processing
+
+Flows are directed acyclic graphs (DAGs):
+
+```
+[Trigger: Order Completed]
+         │
+    [Timer: Wait 2h]
+         │
+    [Condition: Order > $30?]
+        / \
+     Yes   No
+      │     │
+ [Send Email] [Apply Tag: "low_value"]
+```
+
+### Node Types
+
+| Type | Purpose | Sub-types |
+|------|---------|-----------|
+| Trigger | Entry point | 18 event types |
+| Action | Execute task | 11 action types |
+| Condition | Branch logic | yes/no, multi-branch, A/B split |
+| Timer | Delay execution | delay, schedule, date-relative |
+| Logic | Control flow | loop, stop, skip, until, smart date |
+
+### Edge Resolution
+
+Each node can have multiple outgoing edges. The engine:
+1. Finds all edges where `sourceNodeId` matches the current node
+2. For conditions, uses `sourceHandle` to pick the correct branch (e.g., "yes"/"no")
+3. For regular nodes, follows all outgoing edges (parallel execution)
+
+## Kafka Topics
+
+| Topic | Direction | Purpose |
+|-------|-----------|---------|
+| `order-events` | Consume | Order lifecycle events |
+| `customer-events` | Consume | Customer creation/updates |
+| `cart-events` | Consume | Cart abandonment detection |
+| `crm-events` | Produce/Consume | Internal CRM events (tag applied, field changed) |
+| `flow-events` | Produce | Flow execution events (for audit/analytics) |
+
+## Service Layer
+
+| Service | Responsibility |
+|---------|---------------|
+| FlowService | Flow CRUD, activation, validation |
+| FlowEngineService | DAG traversal and node execution orchestration |
+| TriggerService | Event → flow matching and enrollment |
+| ActionService | Action node execution dispatch |
+| ConditionService | Condition evaluation and branch selection |
+| CommunicationService | Email/SMS sending with template interpolation |
+| ContactService | Contact CRUD and lifecycle management |
+| SegmentationService | Dynamic contact filtering |
+| AnalyticsService | Dashboard stats and flow metrics |
+| TimerService | Timer scheduling and management |
+| WebhookService | Outgoing webhook execution |
+| CampaignService | Campaign management |
+| TemplateService | Communication template CRUD |
+| ReviewRequestService | Review request management |
