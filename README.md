@@ -1,4 +1,7 @@
-# oc-crm-engine
+# oc-Server
+---
+
+# OC-CRM
 
 Event-driven CRM automation engine for the OrderChop restaurant SaaS platform.
 
@@ -160,3 +163,4 @@ See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for detailed architecture docum
 ## License
 
 Private — OrderChop internal use only.
+
