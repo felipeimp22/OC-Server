@@ -304,6 +304,7 @@ export class FlowEngineService {
           {
             key: execution._id.toString(),
             value: JSON.stringify({
+              eventType: 'flow.step.ready',
               executionId: execution._id.toString(),
               nextNodeId,
               timestamp: new Date().toISOString(),

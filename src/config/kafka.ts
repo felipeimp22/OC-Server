@@ -11,6 +11,7 @@
 import { Kafka, type Producer, type Consumer, type ConsumerConfig, logLevel } from 'kafkajs';
 import { env } from './env.js';
 import { createLogger } from './logger.js';
+import { KAFKA_TOPICS } from '../kafka/topics.js';
 
 const log = createLogger('kafka');
 
@@ -115,4 +116,34 @@ export async function disconnectProducer(): Promise<void> {
  */
 export function createConsumer(config: ConsumerConfig): Consumer {
   return kafka.consumer(config);
+}
+
+/**
+ * Ensure all required Kafka topics exist.
+ * Uses the Admin API to create topics before consumers subscribe.
+ * Idempotent — existing topics are silently ignored.
+ */
+export async function ensureTopics(): Promise<void> {
+  const admin = kafka.admin();
+  try {
+    await admin.connect();
+    const existingTopics = await admin.listTopics();
+    const allTopics = Object.values(KAFKA_TOPICS);
+    const missing = allTopics.filter((t) => !existingTopics.includes(t));
+
+    if (missing.length > 0) {
+      await admin.createTopics({
+        topics: missing.map((topic) => ({
+          topic,
+          numPartitions: 3,
+          replicationFactor: 1,
+        })),
+      });
+      log.info({ created: missing }, 'Kafka topics created');
+    } else {
+      log.info('All Kafka topics already exist');
+    }
+  } finally {
+    await admin.disconnect();
+  }
 }

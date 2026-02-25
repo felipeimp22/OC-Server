@@ -113,7 +113,7 @@ export class OrderEventConsumer {
 
     // Update order stats
     const orderTotal = (payload.total as number) ?? 0;
-    await this.contactService.recordOrder(restaurantId, contact._id.toString(), orderTotal);
+    const updatedContact = await this.contactService.recordOrder(restaurantId, contact._id.toString(), orderTotal);
 
     // Evaluate triggers
     await this.triggerService.evaluateTriggers(restaurantId, 'order_completed', contact._id.toString(), {
@@ -122,6 +122,17 @@ export class OrderEventConsumer {
       orderType: payload.orderType as string,
       customerId,
     });
+
+    // First order trigger: fire if this was the customer's very first order
+    if (updatedContact && updatedContact.totalOrders === 1) {
+      log.info({ restaurantId, customerId }, 'First order detected — firing first_order trigger');
+      await this.triggerService.evaluateTriggers(restaurantId, 'first_order', contact._id.toString(), {
+        orderId: payload.orderId as string,
+        orderTotal,
+        orderType: payload.orderType as string,
+        customerId,
+      });
+    }
   }
 
   /**

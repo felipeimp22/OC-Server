@@ -21,7 +21,7 @@ import type { FastifyRequest, FastifyReply, FastifyError } from 'fastify';
 import { env } from './config/env.js';
 import { logger } from './config/logger.js';
 import { connectDatabase, disconnectDatabase } from './config/database.js';
-import { connectProducer, disconnectProducer } from './config/kafka.js';
+import { connectProducer, disconnectProducer, ensureTopics } from './config/kafka.js';
 import { disconnectRedis } from './config/redis.js';
 import { authMiddleware, tenancyMiddleware } from './api/middleware/index.js';
 import {
@@ -34,6 +34,7 @@ import {
   campaignRoutes,
   systemRoutes,
   trackingRoutes,
+  eventRoutes,
 } from './api/routes/index.js';
 import {
   OrderEventConsumer,
@@ -125,6 +126,7 @@ function buildApp() {
   app.register(customFieldRoutes, { prefix: '/api/v1/custom-fields' });
   app.register(analyticsRoutes, { prefix: '/api/v1/analytics' });
   app.register(campaignRoutes, { prefix: '/api/v1/campaigns' });
+  app.register(eventRoutes, { prefix: '/api/v1/events' });
 
   return app;
 }
@@ -141,10 +143,12 @@ async function main(): Promise<void> {
   // 2. Build Fastify app
   const app = buildApp();
 
-  // 3. Connect Kafka producer
+  // 3. Connect Kafka producer + ensure topics exist
   if (env.ENABLE_KAFKA) {
     await connectProducer();
     log.info('Kafka producer connected');
+    await ensureTopics();
+    log.info('Kafka topics ensured');
   }
 
   // 4. Start Kafka consumers

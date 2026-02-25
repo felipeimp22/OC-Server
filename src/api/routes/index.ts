@@ -11,3 +11,4 @@ export { analyticsRoutes } from './analytics.js';
 export { campaignRoutes } from './campaigns.js';
 export { systemRoutes } from './system.js';
 export { trackingRoutes } from './tracking.js';
+export { eventRoutes } from './events.js';

@@ -133,4 +133,30 @@ export async function flowRoutes(app: FastifyInstance): Promise<void> {
     const analytics = await analyticsService.getFlowAnalytics(id);
     return analytics;
   });
+
+  // POST /api/v1/flows/:id/executions/:execId/replay — Replay a stuck or errored execution
+  app.post('/:id/executions/:execId/replay', async (request: FastifyRequest, reply: FastifyReply) => {
+    const { id, execId } = (request.params as { id: string; execId: string });
+    const execution = await executionRepo.findOne(request.restaurantId, { _id: execId, flowId: id } as any);
+    if (!execution) return reply.code(404).send({ error: 'Execution not found' });
+    if (execution.status !== 'active' && execution.status !== 'error') {
+      return reply.code(400).send({ error: `Cannot replay execution with status: ${execution.status}` });
+    }
+    if (execution.status === 'error') {
+      await executionRepo.advanceToNode(execId, execution.currentNodeId!);
+    }
+    const { FlowEngineService } = await import('../../services/FlowEngineService.js');
+    const flowEngine = new FlowEngineService();
+    await flowEngine.processCurrentNode(execId);
+    return { success: true, executionId: execId, replayedFromNode: execution.currentNodeId };
+  });
+
+  // POST /api/v1/flows/:id/executions/:execId/reset — Reset a stuck execution to allow re-enrollment
+  app.post('/:id/executions/:execId/reset', async (request: FastifyRequest, reply: FastifyReply) => {
+    const { id, execId } = (request.params as { id: string; execId: string });
+    const execution = await executionRepo.findOne(request.restaurantId, { _id: execId, flowId: id } as any);
+    if (!execution) return reply.code(404).send({ error: 'Execution not found' });
+    await executionRepo.markError(execId, { error: 'manual_reset', resetAt: new Date().toISOString() });
+    return { success: true, executionId: execId, previousStatus: execution.status };
+  });
 }

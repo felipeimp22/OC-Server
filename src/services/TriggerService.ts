@@ -13,6 +13,7 @@
 import { FlowService } from './FlowService.js';
 import { FlowExecutionRepository } from '../repositories/FlowExecutionRepository.js';
 import { FlowExecutionLogRepository } from '../repositories/FlowExecutionLogRepository.js';
+import { FlowEngineService } from './FlowEngineService.js';
 import type { IFlowDocument, IFlowNode } from '../domain/models/crm/Flow.js';
 import type { IFlowExecutionDocument } from '../domain/models/crm/FlowExecution.js';
 import type { ICRMEventPayload } from '../domain/interfaces/IEvent.js';
@@ -84,22 +85,27 @@ export class TriggerService {
   ): Promise<TriggerEvaluationResult> {
     const flowId = flow._id.toString();
 
+    log.info({ flowId, flowName: flow.name, contactId, eventType }, 'Evaluating flow for contact');
+
     // Find the matching trigger node
     const triggerNode = flow.nodes.find(
       (n) => n.type === 'trigger' && n.subType === eventType,
     );
     if (!triggerNode) {
+      log.info({ flowId, eventType, nodeTypes: flow.nodes.map(n => `${n.type}:${n.subType}`) }, 'No matching trigger node found');
       return { flowId, flowName: flow.name, enrolled: false, reason: 'No matching trigger node' };
     }
 
     // Check trigger conditions (e.g., orderTypes filter)
     if (!this.checkTriggerConditions(triggerNode, payload)) {
+      log.info({ flowId, contactId, config: triggerNode.config, payloadStatus: payload.paymentStatus ?? payload.newStatus }, 'Trigger conditions not met');
       return { flowId, flowName: flow.name, enrolled: false, reason: 'Trigger conditions not met' };
     }
 
     // Anti-spam: check if already enrolled
     const isEnrolled = await this.executionRepo.isContactEnrolled(restaurantId, flowId, contactId);
     if (isEnrolled) {
+      log.info({ flowId, contactId }, 'Contact already enrolled — skipping');
       return { flowId, flowName: flow.name, enrolled: false, reason: 'Contact already enrolled' };
     }
 
@@ -120,25 +126,65 @@ export class TriggerService {
   }
 
   /**
+   * Normalize payment status values between different naming conventions.
+   * Stripe uses 'succeeded', but UIs often configure 'paid'.
+   */
+  private normalizePaymentStatus(status: string): string {
+    const mapping: Record<string, string> = {
+      succeeded: 'paid',
+      paid: 'paid',
+      failed: 'failed',
+      pending: 'pending',
+      refunded: 'refunded',
+    };
+    return mapping[status.toLowerCase()] ?? status.toLowerCase();
+  }
+
+  /**
    * Check if the event payload matches the trigger node's conditions.
    */
   private checkTriggerConditions(triggerNode: IFlowNode, payload: ICRMEventPayload): boolean {
     const config = triggerNode.config;
 
+    // Resolve effective payment status from multiple possible payload fields
+    const rawPaymentStatus = payload.paymentStatus ?? payload.newStatus ?? (payload as any).status;
+
+    log.info(
+      { config, orderType: payload.orderType, rawPaymentStatus, orderTotal: payload.orderTotal },
+      'Checking trigger conditions',
+    );
+
     // Check orderTypes filter
-    if (config.orderTypes && Array.isArray(config.orderTypes) && payload.orderType) {
-      if (!config.orderTypes.includes(payload.orderType)) {
+    if (config.orderTypes && Array.isArray(config.orderTypes) && config.orderTypes.length > 0) {
+      if (payload.orderType && !config.orderTypes.includes(payload.orderType)) {
+        log.info({ expected: config.orderTypes, got: payload.orderType }, 'orderType mismatch');
         return false;
       }
+      // If orderTypes is configured but payload has none, allow through (don't block)
     }
 
     // Check minimum order value
     if (config.minOrderValue && typeof config.minOrderValue === 'number' && payload.orderTotal) {
       if (payload.orderTotal < config.minOrderValue) {
+        log.info({ minRequired: config.minOrderValue, got: payload.orderTotal }, 'minOrderValue not met');
         return false;
       }
     }
 
+    // Check paymentStatus filter (e.g. first_order trigger configured for 'paid' only)
+    if (config.paymentStatus && rawPaymentStatus) {
+      const normalizedConfig = this.normalizePaymentStatus(String(config.paymentStatus));
+      const normalizedPayload = this.normalizePaymentStatus(String(rawPaymentStatus));
+      if (normalizedConfig !== normalizedPayload) {
+        log.info(
+          { configStatus: config.paymentStatus, payloadStatus: rawPaymentStatus, normalizedConfig, normalizedPayload },
+          'paymentStatus mismatch after normalization',
+        );
+        return false;
+      }
+    }
+
+    log.info('All trigger conditions passed');
     return true;
   }
 
@@ -182,6 +228,23 @@ export class TriggerService {
       metadata: { payload },
       executedAt: new Date(),
     } as any);
+
+    // Kick off processing of the first action node
+    if (firstNodeId) {
+      try {
+        const flowEngine = new FlowEngineService();
+        await flowEngine.processCurrentNode(execution._id.toString());
+      } catch (err) {
+        log.error(
+          { err, executionId: execution._id.toString(), firstNodeId },
+          'Failed to process first node — marking execution as error',
+        );
+        await this.executionRepo.markError(execution._id.toString(), {
+          error: (err as Error).message,
+          failedNodeId: firstNodeId,
+        });
+      }
+    }
 
     return execution;
   }

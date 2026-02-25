@@ -123,8 +123,10 @@ export class CommunicationService {
       }
       log.info({ to: params.to, messageId: result.messageId }, 'Email sent');
     } catch (err) {
+
       await this.commLogRepo.updateStatus(commLog._id, 'failed');
       log.error({ err, to: params.to }, 'Email send failed after retries');
+      throw err;
     }
 
     return commLog;

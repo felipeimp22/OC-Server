@@ -9,10 +9,20 @@
 /** All trigger subtypes for flow trigger nodes */
 export const TriggerType = {
   // ── OrderChop Triggers ──────────────────────────────────
+  /** Fires when a new order is created */
+  ORDER_CREATED: 'order_created',
+  /** Fires when an order is confirmed (payment received) */
+  ORDER_CONFIRMED: 'order_confirmed',
   /** Fires when an order reaches "completed" status */
   ORDER_COMPLETED: 'order_completed',
+  /** Fires when an order is cancelled */
+  ORDER_CANCELLED: 'order_cancelled',
+  /** Fires when a payment succeeds */
+  PAYMENT_SUCCEEDED: 'payment_succeeded',
   /** Fires when a payment fails */
   PAYMENT_FAILED: 'payment_failed',
+  /** Fires when payment status changes (any transition) */
+  PAYMENT_STATUS_CHANGED: 'payment_status_changed',
   /** Fires when order status changes (any transition) */
   ORDER_STATUS_CHANGED: 'order_status_changed',
   /** Fires when a cart is abandoned (no checkout within timeout) */
