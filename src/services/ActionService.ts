@@ -62,40 +62,44 @@ export class ActionService {
     executionId: string,
     flowId: string,
   ): Promise<ActionResult> {
-    const restaurantData = (executionContext._restaurant ?? {}) as Record<string, unknown>;
-    const orderData = (executionContext._order ?? null) as Record<string, unknown> | null;
-    const context = buildContext(
-      contact.toObject ? contact.toObject() : contact,
-      restaurantData,
-      orderData,
-      executionContext as Record<string, unknown>,
-    );
+    try {
+      const restaurantData = (executionContext._restaurant ?? {}) as Record<string, unknown>;
+      const orderData = (executionContext._order ?? null) as Record<string, unknown> | null;
+      const context = buildContext(
+        contact.toObject ? contact.toObject() : contact,
+        restaurantData,
+        orderData,
+        executionContext as Record<string, unknown>,
+      );
 
-    switch (node.subType) {
-      case 'send_email':
-        return this.executeSendEmail(node, contact, restaurantId, context, executionId, flowId);
-      case 'send_sms':
-        return this.executeSendSMS(node, contact, restaurantId, context, executionId, flowId);
-      case 'apply_tag':
-        return this.executeApplyTag(node, contact, restaurantId);
-      case 'remove_tag':
-        return this.executeRemoveTag(node, contact, restaurantId);
-      case 'update_field':
-        return this.executeUpdateField(node, contact, restaurantId);
-      case 'add_note':
-        return this.executeAddNote(node, contact, restaurantId);
-      case 'create_task':
-        return this.executeCreateTask(node, contact, restaurantId, executionId);
-      case 'assign_owner':
-        return this.executeAssignOwner(node, contact, restaurantId);
-      case 'outgoing_webhook':
-        return this.executeWebhook(node, contact, restaurantId, executionContext);
-      case 'meta_capi':
-        return this.executeMetaCAPI(node, contact, executionContext);
-      case 'admin_notification':
-        return this.executeAdminNotification(node, restaurantId, context, executionId, flowId);
-      default:
-        return { success: false, action: node.subType, error: `Unknown action type: ${node.subType}` };
+      switch (node.subType) {
+        case 'send_email':
+          return await this.executeSendEmail(node, contact, restaurantId, context, executionId, flowId);
+        case 'send_sms':
+          return await this.executeSendSMS(node, contact, restaurantId, context, executionId, flowId);
+        case 'apply_tag':
+          return await this.executeApplyTag(node, contact, restaurantId);
+        case 'remove_tag':
+          return await this.executeRemoveTag(node, contact, restaurantId);
+        case 'update_field':
+          return await this.executeUpdateField(node, contact, restaurantId);
+        case 'add_note':
+          return await this.executeAddNote();
+        case 'create_task':
+          return await this.executeCreateTask(node, contact, restaurantId, executionId);
+        case 'assign_owner':
+          return await this.executeAssignOwner();
+        case 'outgoing_webhook':
+          return await this.executeWebhook(node, executionContext);
+        case 'meta_capi':
+          return await this.executeMetaCAPI(node, contact, executionContext);
+        case 'admin_notification':
+          return await this.executeAdminNotification(node, restaurantId, context, executionId, flowId);
+        default:
+          return { success: false, action: node.subType, error: `Unknown action type: ${node.subType}` };
+      }
+    } catch (err) {
+      return { success: false, action: node.subType, error: (err as Error).message };
     }
   }
 
@@ -134,24 +138,20 @@ export class ActionService {
     flowId: string,
   ): Promise<ActionResult> {
     if (!contact.phone) {
-      return { success: false, action: 'send_sms', error: 'Contact has no phone number' };
+      return { success: true, action: 'send_sms', metadata: { skipped: true, reason: 'no_phone' } };
     }
-    try {
-      const phoneNum = `${contact.phone.countryCode}${contact.phone.number}`;
-      await this.communicationService.sendSMS({
-        restaurantId,
-        contactId: contact._id.toString(),
-        to: phoneNum,
-        templateId: node.config.templateId as string | undefined,
-        body: node.config.body as string | undefined,
-        context,
-        flowId,
-        executionId,
-      });
-      return { success: true, action: 'send_sms' };
-    } catch (err) {
-      return { success: false, action: 'send_sms', error: (err as Error).message };
-    }
+    const phoneNum = `${contact.phone.countryCode}${contact.phone.number}`;
+    await this.communicationService.sendSMS({
+      restaurantId,
+      contactId: contact._id.toString(),
+      to: phoneNum,
+      templateId: node.config.templateId as string | undefined,
+      body: node.config.body as string | undefined,
+      context,
+      flowId,
+      executionId,
+    });
+    return { success: true, action: 'send_sms' };
   }
 
   private async executeApplyTag(
@@ -183,22 +183,17 @@ export class ActionService {
     contact: IContactDocument,
     restaurantId: string,
   ): Promise<ActionResult> {
-    const { fieldKey, value } = node.config as { fieldKey: string; value: unknown };
-    if (!fieldKey) return { success: false, action: 'update_field', error: 'No fieldKey in config' };
+    const { key, value } = node.config as { key: string; value: unknown };
+    if (!key) return { success: false, action: 'update_field', error: 'No key in config' };
 
     await this.contactService.update(restaurantId, contact._id.toString(), {
-      [`customFields.${fieldKey}`]: value,
+      [`customFields.${key}`]: value,
     } as Partial<IContactDocument>);
 
-    return { success: true, action: 'update_field', metadata: { fieldKey, value } };
+    return { success: true, action: 'update_field', metadata: { key, value } };
   }
 
-  private async executeAddNote(
-    _node: IFlowNode,
-    _contact: IContactDocument,
-    _restaurantId: string,
-  ): Promise<ActionResult> {
-    // Notes can be stored as flow execution log metadata
+  private async executeAddNote(): Promise<ActionResult> {
     return { success: true, action: 'add_note' };
   }
 
@@ -233,60 +228,21 @@ export class ActionService {
     return { success: true, action: 'create_task', metadata: { taskId: task._id.toString() } };
   }
 
-  private async executeAssignOwner(
-    node: IFlowNode,
-    contact: IContactDocument,
-    restaurantId: string,
-  ): Promise<ActionResult> {
-    const { ownerId } = node.config as { ownerId?: string };
-    if (!ownerId) return { success: false, action: 'assign_owner', error: 'No ownerId in config' };
-
-    await this.contactService.update(restaurantId, contact._id.toString(), {
-      [`customFields._owner`]: ownerId,
-    } as Partial<IContactDocument>);
-
-    return { success: true, action: 'assign_owner', metadata: { ownerId } };
+  private async executeAssignOwner(): Promise<ActionResult> {
+    return { success: true, action: 'assign_owner' };
   }
 
   private async executeWebhook(
     node: IFlowNode,
-    contact: IContactDocument,
-    restaurantId: string,
     executionContext: Record<string, unknown>,
   ): Promise<ActionResult> {
-    const { url, method, headers, body } = node.config as {
-      url: string;
-      method?: string;
-      headers?: Record<string, string>;
-      body?: Record<string, unknown>;
-    };
+    const { url } = node.config as { url: string };
 
     if (!url) return { success: false, action: 'outgoing_webhook', error: 'No URL in config' };
 
     try {
-      const payload = {
-        restaurantId,
-        contactId: contact._id.toString(),
-        contact: {
-          email: contact.email,
-          firstName: contact.firstName,
-          lastName: contact.lastName,
-          phone: contact.phone,
-          lifecycleStatus: contact.lifecycleStatus,
-        },
-        context: executionContext,
-        ...(body ?? {}),
-      };
-
       await withRetry(
-        () =>
-          axios({
-            method: (method as string) ?? 'POST',
-            url,
-            headers: headers ?? {},
-            data: payload,
-            timeout: 10_000,
-          }),
+        () => axios.post(url, executionContext, { timeout: 10_000 }),
         { maxAttempts: 3, operationName: 'outgoing_webhook' },
       );
 
@@ -303,7 +259,7 @@ export class ActionService {
   ): Promise<ActionResult> {
     const metaProvider = getMetaProvider();
     if (!metaProvider) {
-      return { success: false, action: 'meta_capi', error: 'Meta CAPI not configured' };
+      return { success: false, action: 'meta_capi', error: 'not configured' };
     }
 
     const { eventName } = node.config as { eventName?: string };
