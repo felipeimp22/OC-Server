@@ -139,24 +139,24 @@ export class FlowExecutionRepository extends BaseRepository<IFlowExecutionDocume
   }
 
   /**
-   * Mark execution as errored.
+   * Mark execution as errored, storing metadata in the errorMetadata field.
    */
   async markError(
     id: Types.ObjectId | string,
-    errorContext?: Record<string, unknown>,
+    metadata?: Record<string, unknown>,
   ): Promise<IFlowExecutionDocument | null> {
-    const update: Record<string, unknown> = {
-      status: 'error',
-      completedAt: new Date(),
-      nextExecutionAt: null,
-    };
-    if (errorContext) {
-      for (const [key, value] of Object.entries(errorContext)) {
-        update[`context.${key}`] = value;
-      }
-    }
-
-    return this.model.findByIdAndUpdate(id, { $set: update }, { new: true }).exec();
+    return this.model.findByIdAndUpdate(
+      id,
+      {
+        $set: {
+          status: 'error',
+          completedAt: new Date(),
+          nextExecutionAt: null,
+          errorMetadata: metadata ?? null,
+        },
+      },
+      { new: true },
+    ).exec();
   }
 
   /**

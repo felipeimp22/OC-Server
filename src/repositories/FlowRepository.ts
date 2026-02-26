@@ -56,6 +56,28 @@ export class FlowRepository extends BaseRepository<IFlowDocument> {
   }
 
   /**
+   * Activate a flow (set status to 'active'). Does not touch isSystem flag.
+   */
+  async activate(id: Types.ObjectId | string): Promise<IFlowDocument | null> {
+    return this.model.findByIdAndUpdate(
+      id,
+      { $set: { status: 'active' } },
+      { new: true },
+    ).exec();
+  }
+
+  /**
+   * Pause a flow (set status to 'paused'). Does not touch isSystem flag.
+   */
+  async pause(id: Types.ObjectId | string): Promise<IFlowDocument | null> {
+    return this.model.findByIdAndUpdate(
+      id,
+      { $set: { status: 'paused' } },
+      { new: true },
+    ).exec();
+  }
+
+  /**
    * Increment enrollment count for a flow (atomic).
    */
   async incrementEnrollments(flowId: Types.ObjectId | string): Promise<void> {
