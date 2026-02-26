@@ -68,8 +68,8 @@ describe('domain enums', () => {
   });
 
   describe('TriggerType', () => {
-    it('should have 18 trigger types', () => {
-      expect(TRIGGER_TYPES).toHaveLength(18);
+    it('should have 23 trigger types', () => {
+      expect(TRIGGER_TYPES).toHaveLength(23);
     });
 
     it('should contain order triggers', () => {
