@@ -113,4 +113,15 @@ export class FlowRepository extends BaseRepository<IFlowDocument> {
   async countActive(restaurantId: Types.ObjectId | string): Promise<number> {
     return this.model.countDocuments({ restaurantId, status: 'active' }).exec();
   }
+
+  /**
+   * Sum stats.enrollments across all flows for a restaurant.
+   */
+  async sumEnrollments(restaurantId: Types.ObjectId | string): Promise<number> {
+    const result = await this.model.aggregate([
+      { $match: { restaurantId } },
+      { $group: { _id: null, total: { $sum: '$stats.enrollments' } } },
+    ]).exec() as Array<{ total: number }>;
+    return result[0]?.total ?? 0;
+  }
 }
