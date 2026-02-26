@@ -175,6 +175,7 @@ export class ContactRepository extends BaseRepository<IContactDocument> {
   /**
    * Get segment counts (contacts per lifecycle status).
    * Used for the analytics dashboard.
+   * Always returns all 6 lifecycle statuses, defaulting to 0 if none exist.
    */
   async getSegmentCounts(
     restaurantId: Types.ObjectId | string,
@@ -184,7 +185,14 @@ export class ContactRepository extends BaseRepository<IContactDocument> {
       { $group: { _id: '$lifecycleStatus', count: { $sum: 1 } } },
     ]).exec();
 
-    const segments: Record<string, number> = {};
+    const segments: Record<string, number> = {
+      lead: 0,
+      first_time: 0,
+      returning: 0,
+      lost: 0,
+      recovered: 0,
+      VIP: 0,
+    };
     for (const r of results) {
       segments[r._id as string] = r.count;
     }
