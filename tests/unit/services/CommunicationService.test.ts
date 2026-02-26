@@ -41,6 +41,9 @@ const mockCommLogRepo = {
   updateStatus: vi.fn(),
   updateById: vi.fn(),
 };
+const mockContactRepo = {
+  findById: vi.fn(),
+};
 const mockLinkTrackingRepo = {
   create: vi.fn(),
   recordClick: vi.fn(),
@@ -52,23 +55,20 @@ vi.mock('@/repositories/TemplateRepository.js', () => ({
 vi.mock('@/repositories/CommunicationLogRepository.js', () => ({
   CommunicationLogRepository: vi.fn(() => mockCommLogRepo),
 }));
+vi.mock('@/repositories/ContactRepository.js', () => ({
+  ContactRepository: vi.fn(() => mockContactRepo),
+}));
 vi.mock('@/repositories/LinkTrackingRepository.js', () => ({
   LinkTrackingRepository: vi.fn(() => mockLinkTrackingRepo),
 }));
 
-// Mock providers
+// Mock email provider only (SMS is stubbed)
 const mockEmailProvider = {
   sendEmail: vi.fn(),
-};
-const mockSMSProvider = {
-  sendSMS: vi.fn(),
 };
 
 vi.mock('@/factories/EmailProviderFactory.js', () => ({
   getEmailProvider: () => mockEmailProvider,
-}));
-vi.mock('@/factories/SMSProviderFactory.js', () => ({
-  getSMSProvider: () => mockSMSProvider,
 }));
 
 import { CommunicationService } from '@/services/CommunicationService.js';
@@ -79,6 +79,9 @@ describe('CommunicationService', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     service = new CommunicationService();
+
+    // Default: contact has emailOptIn: true
+    mockContactRepo.findById.mockResolvedValue({ emailOptIn: true });
 
     // Default mock: commLog.create returns a minimal object
     mockCommLogRepo.create.mockResolvedValue({
@@ -118,6 +121,24 @@ describe('CommunicationService', () => {
         }),
       );
       expect(mockCommLogRepo.updateStatus).toHaveBeenCalledWith('log-1', 'sent');
+    });
+
+    it('should skip send and log opted_out when emailOptIn is false', async () => {
+      mockContactRepo.findById.mockResolvedValue({ emailOptIn: false });
+
+      await service.sendEmail({
+        restaurantId: 'rest-1',
+        contactId: 'contact-1',
+        to: 'john@example.com',
+        subject: 'Hello',
+        body: 'Body',
+        context: {},
+      });
+
+      expect(mockEmailProvider.sendEmail).not.toHaveBeenCalled();
+      expect(mockCommLogRepo.create).toHaveBeenCalledWith(
+        expect.objectContaining({ status: 'skipped', reason: 'opted_out' }),
+      );
     });
 
     it('should load a template when templateId is provided', async () => {
@@ -165,13 +186,7 @@ describe('CommunicationService', () => {
   });
 
   describe('sendSMS', () => {
-    it('should send an SMS and update log to sent', async () => {
-      mockSMSProvider.sendSMS.mockResolvedValue({
-        messageId: 'sms-123',
-        status: 'sent',
-        timestamp: new Date(),
-      });
-
+    it('should log skipped with sms_stub and NOT call any SMS provider', async () => {
       const result = await service.sendSMS({
         restaurantId: 'rest-1',
         contactId: 'contact-1',
@@ -181,52 +196,9 @@ describe('CommunicationService', () => {
       });
 
       expect(result._id).toBe('log-1');
-      expect(mockSMSProvider.sendSMS).toHaveBeenCalledWith(
-        expect.objectContaining({
-          to: '+15551234567',
-          body: 'Hi Maria, your order is ready!',
-        }),
+      expect(mockCommLogRepo.create).toHaveBeenCalledWith(
+        expect.objectContaining({ status: 'skipped', reason: 'sms_stub', channel: 'sms' }),
       );
-      expect(mockCommLogRepo.updateStatus).toHaveBeenCalledWith('log-1', 'sent');
-    });
-
-    it('should load a template for SMS', async () => {
-      mockTemplateRepo.findById.mockResolvedValue({
-        body: 'Template SMS: {{first_name}}',
-      });
-      mockSMSProvider.sendSMS.mockResolvedValue({
-        messageId: 'sms-456',
-        status: 'sent',
-        timestamp: new Date(),
-      });
-
-      await service.sendSMS({
-        restaurantId: 'rest-1',
-        contactId: 'contact-1',
-        to: '+15551234567',
-        templateId: 'tpl-sms',
-        context: { first_name: 'Javier' },
-      });
-
-      expect(mockSMSProvider.sendSMS).toHaveBeenCalledWith(
-        expect.objectContaining({
-          body: 'Template SMS: Javier',
-        }),
-      );
-    });
-
-    it('should mark log as failed when SMS provider throws', async () => {
-      mockSMSProvider.sendSMS.mockRejectedValue(new Error('SMS error'));
-
-      await service.sendSMS({
-        restaurantId: 'rest-1',
-        contactId: 'contact-1',
-        to: '+15551234567',
-        body: 'Test',
-        context: {},
-      });
-
-      expect(mockCommLogRepo.updateStatus).toHaveBeenCalledWith('log-1', 'failed');
     });
   });
 

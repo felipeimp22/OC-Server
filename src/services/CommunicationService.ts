@@ -12,9 +12,9 @@
 
 import { v4 as uuidv4 } from 'uuid';
 import { getEmailProvider } from '../factories/EmailProviderFactory.js';
-import { getSMSProvider } from '../factories/SMSProviderFactory.js';
 import { TemplateRepository } from '../repositories/TemplateRepository.js';
 import { CommunicationLogRepository } from '../repositories/CommunicationLogRepository.js';
+import { ContactRepository } from '../repositories/ContactRepository.js';
 import { LinkTrackingRepository } from '../repositories/LinkTrackingRepository.js';
 import type { ICommunicationLogDocument } from '../domain/models/crm/CommunicationLog.js';
 import { interpolate, type InterpolationContext } from '../utils/variableInterpolator.js';
@@ -52,11 +52,13 @@ export interface SendSMSParams {
 export class CommunicationService {
   private readonly templateRepo: TemplateRepository;
   private readonly commLogRepo: CommunicationLogRepository;
+  private readonly contactRepo: ContactRepository;
   private readonly linkTrackingRepo: LinkTrackingRepository;
 
   constructor() {
     this.templateRepo = new TemplateRepository();
     this.commLogRepo = new CommunicationLogRepository();
+    this.contactRepo = new ContactRepository();
     this.linkTrackingRepo = new LinkTrackingRepository();
   }
 
@@ -67,6 +69,25 @@ export class CommunicationService {
    * @returns The communication log record
    */
   async sendEmail(params: SendEmailParams): Promise<ICommunicationLogDocument> {
+    // Check email opt-in status
+    const contact = await this.contactRepo.findById(params.restaurantId, params.contactId);
+    if (contact && contact.emailOptIn === false) {
+      log.info({ contactId: params.contactId }, 'Contact opted out — skipping email send');
+      return this.commLogRepo.create({
+        restaurantId: params.restaurantId,
+        contactId: params.contactId,
+        channel: 'email',
+        templateId: params.templateId ?? null,
+        flowId: params.flowId ?? null,
+        executionId: params.executionId ?? null,
+        to: params.to,
+        subject: params.subject ?? '',
+        status: 'skipped',
+        reason: 'opted_out',
+        sentAt: new Date(),
+      } as any);
+    }
+
     let subject = params.subject ?? '';
     let body = params.body ?? '';
 
@@ -132,23 +153,11 @@ export class CommunicationService {
 
   /**
    * Send an SMS to a contact.
+   * Currently a stub — logs skipped with reason 'sms_stub'. No real send occurs.
    */
   async sendSMS(params: SendSMSParams): Promise<ICommunicationLogDocument> {
-    let body = params.body ?? '';
-
-    // Load template if specified
-    if (params.templateId) {
-      const template = await this.templateRepo.findById(params.restaurantId, params.templateId);
-      if (template) {
-        body = template.body ?? body;
-      }
-    }
-
-    // Interpolate variables
-    body = interpolate(body, params.context);
-
-    // Create communication log
-    const commLog = await this.commLogRepo.create({
+    log.info({ contactId: params.contactId, to: params.to }, 'SMS send stubbed — skipping');
+    return this.commLogRepo.create({
       restaurantId: params.restaurantId,
       contactId: params.contactId,
       channel: 'sms',
@@ -157,39 +166,10 @@ export class CommunicationService {
       executionId: params.executionId ?? null,
       to: params.to,
       subject: null,
-      status: 'queued',
+      status: 'skipped',
+      reason: 'sms_stub',
       sentAt: new Date(),
     } as any);
-
-    // Send via provider with retry
-    try {
-      const provider = getSMSProvider();
-      const result = await withRetry(
-        () =>
-          provider.sendSMS({
-            to: params.to,
-            body,
-            metadata: {
-              communicationLogId: commLog._id.toString(),
-              contactId: params.contactId,
-            },
-          }),
-        { maxAttempts: 3, operationName: 'send_sms' },
-      );
-
-      await this.commLogRepo.updateStatus(commLog._id, 'sent');
-      if (result.messageId) {
-        await this.commLogRepo.updateById(params.restaurantId, commLog._id.toString(), {
-          $set: { providerMessageId: result.messageId },
-        });
-      }
-      log.info({ to: params.to, messageId: result.messageId }, 'SMS sent');
-    } catch (err) {
-      await this.commLogRepo.updateStatus(commLog._id, 'failed');
-      log.error({ err, to: params.to }, 'SMS send failed after retries');
-    }
-
-    return commLog;
   }
 
   /**

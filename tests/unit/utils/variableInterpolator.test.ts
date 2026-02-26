@@ -25,14 +25,14 @@ describe('variableInterpolator', () => {
       expect(result).toBe('Hello John!');
     });
 
-    it('should leave unmatched variables as-is', () => {
+    it('should replace unmatched variables with empty string', () => {
       const result = interpolate('Hello {{first_name}} {{unknown}}!', { first_name: 'John' });
-      expect(result).toBe('Hello John {{unknown}}!');
+      expect(result).toBe('Hello John !');
     });
 
-    it('should handle null/undefined values by keeping placeholder', () => {
+    it('should replace null/undefined values with empty string', () => {
       const result = interpolate('Hello {{first_name}}!', { first_name: null });
-      expect(result).toBe('Hello {{first_name}}!');
+      expect(result).toBe('Hello !');
     });
 
     it('should convert numbers to strings', () => {

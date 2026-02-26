@@ -48,10 +48,10 @@ const VARIABLE_PATTERN = /\{\{\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*\}\}/g;
  * ```
  */
 export function interpolate(template: string, context: InterpolationContext): string {
-  return template.replace(VARIABLE_PATTERN, (match, variableName: string) => {
+  return template.replace(VARIABLE_PATTERN, (_match, variableName: string) => {
     const value = context[variableName];
     if (value === null || value === undefined) {
-      return match; // Leave unrecognized/null variables as-is
+      return ''; // Unknown or null vars replaced with empty string
     }
     return String(value);
   });
