@@ -55,7 +55,10 @@ export async function flowRoutes(app: FastifyInstance): Promise<void> {
   // GET /api/v1/flows — List flows
   app.get('/', async (request: FastifyRequest) => {
     const query = paginationQuery.parse(request.query);
-    const result = await flowService.list(request.restaurantId, {}, {
+    const { status } = (request.query as { status?: string });
+    const filters: Record<string, unknown> = {};
+    if (status) filters['status'] = status;
+    const result = await flowService.list(request.restaurantId, filters, {
       page: query.page,
       limit: query.limit,
       sortBy: query.sort,
@@ -83,17 +86,25 @@ export async function flowRoutes(app: FastifyInstance): Promise<void> {
   app.put('/:id', async (request: FastifyRequest, reply: FastifyReply) => {
     const { id } = idParam.parse(request.params);
     const body = updateFlowBody.parse(request.body);
-    const flow = await flowService.update(request.restaurantId, id, body as any);
-    if (!flow) return reply.code(404).send({ error: 'Flow not found' });
-    return flow;
+    try {
+      const flow = await flowService.update(request.restaurantId, id, body as any);
+      if (!flow) return reply.code(404).send({ error: 'Flow not found' });
+      return flow;
+    } catch (err: any) {
+      return reply.code(400).send({ error: err.message });
+    }
   });
 
   // DELETE /api/v1/flows/:id — Delete flow
   app.delete('/:id', async (request: FastifyRequest, reply: FastifyReply) => {
     const { id } = idParam.parse(request.params);
-    const deleted = await flowService.delete(request.restaurantId, id);
-    if (!deleted) return reply.code(404).send({ error: 'Flow not found' });
-    return { success: true };
+    try {
+      const deleted = await flowService.delete(request.restaurantId, id);
+      if (!deleted) return reply.code(404).send({ error: 'Flow not found' });
+      return { success: true };
+    } catch (err: any) {
+      return reply.code(400).send({ error: err.message });
+    }
   });
 
   // POST /api/v1/flows/:id/activate — Activate flow
