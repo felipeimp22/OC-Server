@@ -61,7 +61,7 @@ export class AnalyticsService {
    * Get per-flow node analytics.
    */
   async getFlowAnalytics(flowId: string) {
-    return this.logRepo.getNodeAnalytics(flowId);
+    return this.logRepo.getNodeStats(flowId);
   }
 
   /**

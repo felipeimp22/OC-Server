@@ -46,7 +46,7 @@ export class FlowExecutionLogRepository extends BaseRepository<IFlowExecutionLog
    * Get step-level analytics for a flow: count of success/failure/skipped per node.
    * Used for the flow analytics dashboard.
    */
-  async getNodeAnalytics(
+  async getNodeStats(
     flowId: Types.ObjectId | string,
   ): Promise<Array<{ nodeId: string; nodeType: string; success: number; failure: number; skipped: number; total: number }>> {
     const results = await this.model.aggregate([
