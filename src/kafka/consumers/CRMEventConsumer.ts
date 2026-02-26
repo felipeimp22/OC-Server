@@ -103,11 +103,14 @@ export class CRMEventConsumer {
 
     log.debug({ eventType, contactId }, 'Processing internal contact event');
 
-    // Map internal event types to trigger types
+    // Map internal event types to trigger subtypes
     let triggerType: string | null = null;
     switch (eventType) {
       case 'contact.tag_applied':
         triggerType = 'tag_applied';
+        break;
+      case 'contact.field_changed':
+        triggerType = 'field_changed';
         break;
       case 'contact.tag_removed':
         triggerType = 'tag_removed';
