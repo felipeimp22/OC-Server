@@ -11,6 +11,7 @@ import { CommunicationService } from '../../services/CommunicationService.js';
 import { Customer } from '../../domain/models/external/Customer.js';
 import { env } from '../../config/env.js';
 import { createLogger } from '../../config/logger.js';
+import { KAFKA_TOPICS } from '../../kafka/topics.js';
 
 const log = createLogger('SystemRoutes');
 
@@ -29,7 +30,13 @@ export async function systemRoutes(app: FastifyInstance): Promise<void> {
 
   // GET /api/v1/system/kafka-status
   app.get('/system/kafka-status', async () => {
-    return { status: 'ok', message: 'Kafka consumer groups running' };
+    if (!env.ENABLE_KAFKA) {
+      return { enabled: false };
+    }
+    return {
+      enabled: true,
+      topics: Object.values(KAFKA_TOPICS),
+    };
   });
 
   // POST /api/v1/system/sync-contacts — Force sync contacts from OrderChop
