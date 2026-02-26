@@ -8,6 +8,7 @@
 
 import type { EachMessagePayload } from 'kafkajs';
 import { createConsumer } from '../../config/kafka.js';
+import { env } from '../../config/env.js';
 import { KAFKA_TOPICS } from '../topics.js';
 import { ContactService } from '../../services/ContactService.js';
 import { TriggerService } from '../../services/TriggerService.js';
@@ -27,7 +28,7 @@ export class OrderEventConsumer {
   }
 
   async start(): Promise<void> {
-    this.consumer = createConsumer({ groupId: 'crm-order-consumer' });
+    this.consumer = createConsumer({ groupId: env.KAFKA_CONSUMER_GROUP });
     await this.consumer.connect();
     await this.consumer.subscribe({
       topics: [KAFKA_TOPICS.ORDERCHOP_ORDERS, KAFKA_TOPICS.ORDERCHOP_PAYMENTS],
@@ -83,8 +84,11 @@ export class OrderEventConsumer {
           break;
 
         case 'payment.failed':
+          await this.handlePaymentFailed(payload);
+          break;
+
         case 'payment.refunded':
-          await this.handleOrderEvent(eventType.replace('.', '_'), payload);
+          await this.handleOrderEvent('payment_refunded', payload);
           break;
 
         default:
@@ -96,26 +100,33 @@ export class OrderEventConsumer {
   }
 
   /**
-   * Handle order.completed — update contact stats + trigger flows.
+   * Handle order.completed — upsert contact, update stats, trigger flows.
    */
   private async handleOrderCompleted(payload: Record<string, unknown>): Promise<void> {
     const restaurantId = payload.restaurantId as string;
     const customerId = payload.customerId as string;
 
-    if (!restaurantId || !customerId) return;
-
-    // Get or create contact
-    const contact = await this.contactService.getByCustomerId(restaurantId, customerId);
-    if (!contact) {
-      log.warn({ restaurantId, customerId }, 'Contact not found for completed order');
+    if (!restaurantId || !customerId) {
+      log.warn({ restaurantId, customerId }, 'order.completed missing restaurantId or customerId — skipping');
       return;
     }
 
+    // Upsert contact from event payload (creates if not yet in CRM)
+    const contact = await this.contactService.upsertFromEvent(restaurantId, {
+      customerId,
+      name: payload.customerName as string | undefined,
+      email: payload.customerEmail as string | undefined,
+    });
+
     // Update order stats
     const orderTotal = (payload.total as number) ?? 0;
-    const updatedContact = await this.contactService.recordOrder(restaurantId, contact._id.toString(), orderTotal);
+    const updatedContact = await this.contactService.incrementOrderStats(
+      restaurantId,
+      contact._id.toString(),
+      orderTotal,
+    );
 
-    // Evaluate triggers
+    // Evaluate order_completed triggers
     await this.triggerService.evaluateTriggers(restaurantId, 'order_completed', contact._id.toString(), {
       orderId: payload.orderId as string,
       orderTotal,
@@ -136,12 +147,36 @@ export class OrderEventConsumer {
   }
 
   /**
+   * Handle payment.failed — evaluate payment_failed triggers.
+   */
+  private async handlePaymentFailed(payload: Record<string, unknown>): Promise<void> {
+    const restaurantId = payload.restaurantId as string;
+    const customerId = payload.customerId as string;
+
+    if (!restaurantId || !customerId) {
+      log.warn({ restaurantId, customerId }, 'payment.failed missing restaurantId or customerId — skipping');
+      return;
+    }
+
+    const contact = await this.contactService.getByCustomerId(restaurantId, customerId);
+    if (!contact) {
+      log.warn({ restaurantId, customerId }, 'No contact found for payment.failed event — skipping');
+      return;
+    }
+
+    await this.triggerService.evaluateTriggers(restaurantId, 'payment_failed', contact._id.toString(), payload);
+  }
+
+  /**
    * Handle generic order events — just evaluate triggers.
    */
   private async handleOrderEvent(eventType: string, payload: Record<string, unknown>): Promise<void> {
     const restaurantId = payload.restaurantId as string;
     const customerId = payload.customerId as string;
-    if (!restaurantId || !customerId) return;
+    if (!restaurantId || !customerId) {
+      log.warn({ restaurantId, customerId, eventType }, 'Order event missing restaurantId or customerId — skipping');
+      return;
+    }
 
     const contact = await this.contactService.getByCustomerId(restaurantId, customerId);
     if (!contact) return;
