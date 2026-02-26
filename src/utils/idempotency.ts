@@ -14,33 +14,45 @@ const log = createLogger('idempotency');
 const repo = new ProcessedEventRepository();
 
 /**
- * Check and mark an event as processed in a single atomic operation.
+ * Attempt to mark an event as processed, optionally executing a callback on first occurrence.
+ *
+ * Inserts the eventId via markProcessed (throws E11000 on duplicate).
+ * Catches E11000 silently and returns false.
+ * On first occurrence: calls fn() if provided, then returns true.
  *
  * @param eventId - UUID from the Kafka event
  * @param eventType - Event type for logging
- * @returns true if this is the first processing (proceed), false if already processed (skip)
+ * @param fn - Optional async callback to execute only on first occurrence
+ * @returns true if this is the first processing (fn was called if provided), false if duplicate
  *
  * @example
  * ```ts
- * const shouldProcess = await tryProcessEvent(event.eventId, event.eventType);
- * if (!shouldProcess) {
+ * const processed = await tryProcessEvent(eventId, eventType, async () => {
+ *   await handleEvent(payload);
+ * });
+ * if (!processed) {
  *   log.debug({ eventId }, 'Skipping duplicate event');
- *   return;
  * }
- * // ... process the event
  * ```
  */
-export async function tryProcessEvent(eventId: string, eventType: string): Promise<boolean> {
-  const alreadyProcessed = await repo.isProcessed(eventId);
-  if (alreadyProcessed) {
-    log.debug({ eventId, eventType }, 'Event already processed — skipping');
-    return false;
+export async function tryProcessEvent(
+  eventId: string,
+  eventType: string,
+  fn?: () => Promise<void>,
+): Promise<boolean> {
+  try {
+    await repo.markProcessed(eventId, eventType);
+  } catch (err: unknown) {
+    // E11000 duplicate key — event already processed, skip silently
+    if (err instanceof Error && 'code' in err && (err as { code: number }).code === 11000) {
+      log.debug({ eventId, eventType }, 'Event already processed — skipping');
+      return false;
+    }
+    throw err;
   }
 
-  const marked = await repo.markProcessed(eventId, eventType);
-  if (!marked) {
-    log.debug({ eventId, eventType }, 'Event was processed by another consumer — skipping');
-    return false;
+  if (fn) {
+    await fn();
   }
 
   return true;
