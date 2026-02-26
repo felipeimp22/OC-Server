@@ -109,13 +109,14 @@ export class FlowService {
       throw new Error('Cannot activate an archived flow');
     }
 
-    // Validate flow has at least one trigger and one downstream node
+    // Validate flow has at least one trigger and one action node
     const hasTrigger = flow.nodes.some((n) => n.type === 'trigger');
     if (!hasTrigger) {
       throw new Error('Flow must have at least one trigger node');
     }
-    if (flow.nodes.length < 2) {
-      throw new Error('Flow must have at least two nodes');
+    const hasAction = flow.nodes.some((n) => n.type === 'action');
+    if (!hasAction) {
+      throw new Error('Flow must have at least one action node');
     }
 
     const updated = await this.flowRepo.updateById(restaurantId, flowId, {

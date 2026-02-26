@@ -198,7 +198,7 @@ describe('FlowService', () => {
         .rejects.toThrow('Flow must have at least one trigger node');
     });
 
-    it('should throw when flow has less than 2 nodes', async () => {
+    it('should throw when flow has no action node', async () => {
       mockFlowRepo.findById.mockResolvedValue({
         _id: 'f1',
         status: 'draft',
@@ -206,7 +206,7 @@ describe('FlowService', () => {
       });
 
       await expect(service.activate('rest-1', 'f1'))
-        .rejects.toThrow('Flow must have at least two nodes');
+        .rejects.toThrow('Flow must have at least one action node');
     });
 
     it('should return null for non-existent flow', async () => {

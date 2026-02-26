@@ -55,6 +55,62 @@ export class FlowEngineService {
   }
 
   /**
+   * Enroll a contact in a flow.
+   * Creates a FlowExecution starting at the trigger node, then kicks off
+   * DAG processing via processCurrentNode().
+   *
+   * @param restaurantId - Tenant ID
+   * @param flowId - Flow to enroll in
+   * @param contactId - Contact to enroll
+   * @param context - Initial execution context (e.g. order data)
+   */
+  async enrollContact(
+    restaurantId: string,
+    flowId: string,
+    contactId: string,
+    context: Record<string, unknown> = {},
+  ): Promise<void> {
+    // Load flow to find trigger node
+    const flow = await this.flowRepo.findById(restaurantId, flowId);
+    if (!flow) {
+      log.warn({ restaurantId, flowId }, 'enrollContact: Flow not found');
+      return;
+    }
+
+    // Find trigger node (currentNodeId starts here)
+    const triggerNode = flow.nodes.find((n) => n.type === 'trigger');
+    if (!triggerNode) {
+      log.warn({ flowId }, 'enrollContact: No trigger node in flow');
+      return;
+    }
+
+    // Anti-spam: skip if already actively enrolled
+    const alreadyEnrolled = await this.executionRepo.isContactEnrolled(restaurantId, flowId, contactId);
+    if (alreadyEnrolled) {
+      log.debug({ flowId, contactId }, 'Contact already enrolled — skipping');
+      return;
+    }
+
+    // Create execution record
+    const execution = await this.executionRepo.create({
+      flowId,
+      restaurantId,
+      contactId,
+      status: 'active',
+      currentNodeId: triggerNode.id,
+      context,
+    } as any);
+
+    // Increment enrollment stats
+    await this.flowRepo.incrementEnrollments(flowId);
+
+    log.info({ restaurantId, flowId, contactId, executionId: execution._id }, 'Contact enrolled in flow');
+
+    // Begin DAG traversal
+    await this.processCurrentNode(execution._id.toString());
+  }
+
+  /**
    * Process the current node for a flow execution.
    * This is the main entry point called by Kafka consumers when
    * a `flow.step.ready` event is received.
