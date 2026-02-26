@@ -1,10 +1,8 @@
 /**
  * @fileoverview Condition Service — evaluates condition nodes in flows.
  *
- * Handles:
- * - Yes/No conditions (field comparison)
- * - Multi-branch conditions (first matching branch)
- * - A/B split (random distribution)
+ * Handles yes_no condition evaluation with AND/OR operator joining.
+ * Unsupported subtypes (ab_split, multi_branch, random_distribution) default to 'yes'.
  *
  * @module services/ConditionService
  */
@@ -17,20 +15,27 @@ const log = createLogger('ConditionService');
 
 /** Result of evaluating a condition node */
 export interface ConditionResult {
-  /** Which output handle to follow (e.g., "yes", "no", "branch_0", "default") */
-  handle: string;
+  /** Which output handle to follow — 'yes' or 'no' for yes_no nodes */
+  handle: 'yes' | 'no';
   /** Human-readable explanation */
   reason: string;
+}
+
+interface SingleCondition {
+  field: string;
+  operator: string;
+  value: unknown;
 }
 
 export class ConditionService {
   /**
    * Evaluate a condition node against a contact and execution context.
+   * Pure synchronous — no async operations.
    *
    * @param node - The condition node to evaluate
    * @param contact - The CRM contact
    * @param context - The execution context (runtime variables)
-   * @returns Which output handle to follow
+   * @returns { handle: 'yes' | 'no', reason: string }
    */
   evaluate(
     node: IFlowNode,
@@ -40,122 +45,97 @@ export class ConditionService {
     switch (node.subType) {
       case 'yes_no':
         return this.evaluateYesNo(node, contact, context);
-      case 'multi_branch':
-        return this.evaluateMultiBranch(node, contact, context);
+
       case 'ab_split':
-        return this.evaluateABSplit(node);
+      case 'multi_branch':
+      case 'random_distribution':
+        return { handle: 'yes', reason: 'not implemented — defaulting to yes' };
+
       default:
-        log.warn({ subType: node.subType }, 'Unknown condition subType');
-        return { handle: 'default', reason: `Unknown condition type: ${node.subType}` };
+        log.warn({ subType: node.subType }, 'Unknown condition subType — defaulting to yes');
+        return { handle: 'yes', reason: 'not implemented — defaulting to yes' };
     }
   }
 
   /**
-   * Evaluate a yes/no condition.
+   * Evaluate a yes/no condition node.
    *
-   * Config: { field: string, operator: "eq"|"gt"|"lt"|"gte"|"lte"|"contains"|"exists"|"not_exists", value: any }
+   * Config supports two formats:
+   * - Array: { conditions: [{ field, operator, value }], operator: 'AND' | 'OR' }
+   * - Single (legacy): { field, operator, value }
+   *
+   * Supported operators: equals, not_equals, greater_than, less_than,
+   *                      contains, not_contains, exists, not_exists
    */
   private evaluateYesNo(
     node: IFlowNode,
     contact: IContactDocument,
     context: Record<string, unknown>,
   ): ConditionResult {
-    const { field, operator, value } = node.config as {
-      field: string;
-      operator: string;
-      value: unknown;
-    };
+    const config = node.config as Record<string, unknown>;
 
-    // Resolve the field value from contact or context
-    const actualValue = this.resolveField(field, contact, context);
-    const result = this.compare(actualValue, operator, value);
+    let conditions: SingleCondition[];
+    let joinOperator: 'AND' | 'OR' = 'AND';
 
-    const handle = result ? 'yes' : 'no';
-    const reason = `${field} ${operator} ${JSON.stringify(value)} → ${handle} (actual: ${JSON.stringify(actualValue)})`;
+    if (Array.isArray(config.conditions) && config.conditions.length > 0) {
+      conditions = config.conditions as SingleCondition[];
+      joinOperator = (config.operator as 'AND' | 'OR') ?? 'AND';
+    } else if (config.field) {
+      // Legacy single-condition format
+      conditions = [
+        {
+          field: config.field as string,
+          operator: config.operator as string,
+          value: config.value,
+        },
+      ];
+    } else {
+      return { handle: 'yes', reason: 'No conditions configured' };
+    }
 
-    log.debug({ nodeId: node.id, field, operator, value, actualValue, result }, reason);
+    const results = conditions.map((cond) => {
+      const actual = this.resolveField(cond.field, contact, context);
+      const passed = this.compare(actual, cond.operator, cond.value);
+      log.debug(
+        { field: cond.field, operator: cond.operator, expected: cond.value, actual, passed },
+        'Condition evaluated',
+      );
+      return passed;
+    });
+
+    const overall =
+      joinOperator === 'OR' ? results.some(Boolean) : results.every(Boolean);
+
+    const handle: 'yes' | 'no' = overall ? 'yes' : 'no';
+    const reason = `${joinOperator}(${conditions.map((c) => `${c.field} ${c.operator} ${JSON.stringify(c.value)}`).join(', ')}) → ${handle}`;
 
     return { handle, reason };
   }
 
   /**
-   * Evaluate a multi-branch condition.
-   *
-   * Config: { branches: [{ handle: "branch_0", field, operator, value }, ...] }
-   */
-  private evaluateMultiBranch(
-    node: IFlowNode,
-    contact: IContactDocument,
-    context: Record<string, unknown>,
-  ): ConditionResult {
-    const branches = (node.config.branches ?? []) as Array<{
-      handle: string;
-      field: string;
-      operator: string;
-      value: unknown;
-    }>;
-
-    for (const branch of branches) {
-      const actualValue = this.resolveField(branch.field, contact, context);
-      if (this.compare(actualValue, branch.operator, branch.value)) {
-        return {
-          handle: branch.handle,
-          reason: `Branch ${branch.handle}: ${branch.field} ${branch.operator} ${JSON.stringify(branch.value)}`,
-        };
-      }
-    }
-
-    return { handle: 'default', reason: 'No branch matched — using default' };
-  }
-
-  /**
-   * Evaluate an A/B split (random distribution).
-   *
-   * Config: { distribution: [50, 50] } — percentages for each branch
-   */
-  private evaluateABSplit(node: IFlowNode): ConditionResult {
-    const distribution = (node.config.distribution ?? [50, 50]) as number[];
-    const random = Math.random() * 100;
-
-    let cumulative = 0;
-    for (let i = 0; i < distribution.length; i++) {
-      cumulative += distribution[i]!;
-      if (random <= cumulative) {
-        const handle = `branch_${i}`;
-        return {
-          handle,
-          reason: `A/B split: random ${random.toFixed(1)} → ${handle} (${distribution[i]}%)`,
-        };
-      }
-    }
-
-    return {
-      handle: `branch_${distribution.length - 1}`,
-      reason: 'A/B split: fallback to last branch',
-    };
-  }
-
-  /**
    * Resolve a field value from the contact or execution context.
-   * Checks contact properties first, then custom fields, then context.
+   *
+   * Supported fields: totalOrders, lifetimeValue, lifecycleStatus, tags,
+   *   customFields.<key>, emailOptIn, smsOptIn, or any direct contact property.
    */
   private resolveField(
     field: string,
     contact: IContactDocument,
     context: Record<string, unknown>,
   ): unknown {
-    // Check direct contact properties
-    const contactObj = contact.toObject ? contact.toObject() : contact;
+    // Handle customFields.<key> dot notation
+    if (field.startsWith('customFields.')) {
+      const key = field.slice('customFields.'.length);
+      return contact.customFields?.[key];
+    }
+
+    // Direct contact properties
+    const contactObj = (contact.toObject ? contact.toObject() : contact) as Record<string, unknown>;
     if (field in contactObj) {
-      return (contactObj as Record<string, unknown>)[field];
+      return contactObj[field];
     }
 
-    // Check custom fields
-    if (contact.customFields && field in contact.customFields) {
-      return contact.customFields[field];
-    }
-
-    // Check execution context
+    // Execution context fallback
     if (field in context) {
       return context[field];
     }
@@ -165,35 +145,47 @@ export class ConditionService {
 
   /**
    * Compare two values using the given operator.
+   *
+   * Supported: equals, not_equals, greater_than, less_than,
+   *            contains, not_contains, exists, not_exists
    */
   private compare(actual: unknown, operator: string, expected: unknown): boolean {
     switch (operator) {
-      case 'eq':
-        return actual === expected || String(actual) === String(expected);
-      case 'neq':
-        return actual !== expected && String(actual) !== String(expected);
-      case 'gt':
+      case 'equals':
+        // eslint-disable-next-line eqeqeq
+        return actual == expected;
+
+      case 'not_equals':
+        // eslint-disable-next-line eqeqeq
+        return actual != expected;
+
+      case 'greater_than':
         return Number(actual) > Number(expected);
-      case 'gte':
-        return Number(actual) >= Number(expected);
-      case 'lt':
+
+      case 'less_than':
         return Number(actual) < Number(expected);
-      case 'lte':
-        return Number(actual) <= Number(expected);
+
       case 'contains':
+        if (Array.isArray(actual)) {
+          // For tags (ObjectId array) — compare as strings
+          return actual.some((item) => String(item) === String(expected));
+        }
         return typeof actual === 'string' && actual.includes(String(expected));
+
       case 'not_contains':
+        if (Array.isArray(actual)) {
+          return !actual.some((item) => String(item) === String(expected));
+        }
         return typeof actual === 'string' && !actual.includes(String(expected));
+
       case 'exists':
         return actual !== undefined && actual !== null;
+
       case 'not_exists':
         return actual === undefined || actual === null;
-      case 'in':
-        return Array.isArray(expected) && expected.includes(actual);
-      case 'not_in':
-        return Array.isArray(expected) && !expected.includes(actual);
+
       default:
-        log.warn({ operator }, 'Unknown comparison operator');
+        log.warn({ operator }, 'Unknown comparison operator — returning false');
         return false;
     }
   }
