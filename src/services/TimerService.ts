@@ -46,25 +46,25 @@ export class TimerService {
    * @param contact - The CRM contact (for date field resolution)
    * @param executionId - Flow execution ID
    * @param timezone - Restaurant timezone
-   * @returns The target execution time, or null if timer could not be scheduled
+   * @returns { targetDate: Date } on success, or null on failure
    */
   async scheduleTimer(
     node: IFlowNode,
     contact: IContactDocument,
     executionId: string,
     timezone: string,
-  ): Promise<Date | null> {
+  ): Promise<{ targetDate: Date } | null> {
     let targetDate: Date | null = null;
 
     switch (node.subType) {
       case 'delay':
         targetDate = this.calculateDelay(node);
         break;
-      case 'date':
-        targetDate = this.calculateDateTimer(node, contact);
+      case 'date_field':
+        targetDate = this.calculateDateFieldTimer(node, contact);
         break;
-      case 'advanced':
-        targetDate = this.calculateAdvancedTimer(node, timezone);
+      case 'smart_date_sequence':
+        targetDate = this.calculateSmartDateSequence(node, timezone);
         break;
       default:
         log.warn({ subType: node.subType }, 'Unknown timer subType');
@@ -72,8 +72,8 @@ export class TimerService {
     }
 
     if (!targetDate || targetDate <= new Date()) {
-      log.warn({ executionId, nodeId: node.id, targetDate }, 'Timer target is in the past — executing immediately');
-      return new Date(); // Will be processed immediately
+      log.warn({ executionId, nodeId: node.id, targetDate }, 'Timer target is in the past — skipping');
+      return null;
     }
 
     // Update execution with nextExecutionAt
@@ -84,7 +84,7 @@ export class TimerService {
 
     if (!this.timerQueue) {
       log.warn({ executionId, nodeId: node.id }, 'Timer queue not available — Redis disabled');
-      return targetDate;
+      return { targetDate };
     }
 
     await this.timerQueue.add(
@@ -94,16 +94,13 @@ export class TimerService {
         delay: delayMs,
         jobId: `timer-${executionId}-${node.id}`,
         removeOnComplete: true,
-        removeOnFail: 100, // Keep last 100 failed jobs for debugging
+        removeOnFail: 100,
       },
     );
 
-    log.info(
-      { executionId, nodeId: node.id, targetDate, delayMs },
-      'Timer scheduled',
-    );
+    log.info({ executionId, nodeId: node.id, targetDate, delayMs }, 'Timer scheduled');
 
-    return targetDate;
+    return { targetDate };
   }
 
   /**
@@ -116,35 +113,48 @@ export class TimerService {
   }
 
   /**
-   * Calculate target for a date field timer.
-   * Config: { dateField: string, offsetDays: number }
+   * Calculate target for a date_field timer.
+   * Config: { field: string, offsetDays?: number }
+   * Skips (returns null) if field is missing or the target date is in the past.
    */
-  private calculateDateTimer(node: IFlowNode, contact: IContactDocument): Date | null {
-    const { dateField, offsetDays } = node.config as { dateField: string; offsetDays: number };
+  private calculateDateFieldTimer(node: IFlowNode, contact: IContactDocument): Date | null {
+    const { field, offsetDays } = node.config as { field: string; offsetDays?: number };
+
+    if (!field) return null;
 
     // Resolve the date field from custom fields or contact properties
-    const contactObj = contact.toObject ? contact.toObject() : contact;
+    const contactObj = (contact.toObject ? contact.toObject() : contact) as Record<string, unknown>;
     const dateValue =
-      (contact.customFields?.[dateField] as string | Date) ??
-      (contactObj as Record<string, unknown>)[dateField] as string | Date | null;
+      (contact.customFields?.[field] as string | Date | undefined) ??
+      (contactObj[field] as string | Date | undefined) ??
+      null;
 
-    return calculateDateFieldTarget(dateValue as string | Date | null, offsetDays ?? 0);
+    const result = calculateDateFieldTarget(dateValue as string | Date | null, offsetDays ?? 0);
+
+    // Skip if date is in the past
+    if (!result || result <= new Date()) return null;
+
+    return result;
   }
 
   /**
-   * Calculate target for an advanced timer.
-   * Config: { delay, unit, weekdays, time, timezone }
+   * Calculate target for a smart_date_sequence timer.
+   * Config: { weekday?: number, time?: string } — next occurrence of weekday+time in timezone.
    */
-  private calculateAdvancedTimer(node: IFlowNode, timezone: string): Date {
+  private calculateSmartDateSequence(node: IFlowNode, timezone: string): Date {
     const config = node.config as {
-      delay: number;
-      unit: 'minutes' | 'hours' | 'days';
+      weekday?: number;
       weekdays?: number[];
       time?: string;
+      delay?: number;
+      unit?: 'minutes' | 'hours' | 'days';
     };
 
     return calculateAdvancedTimerTarget({
-      ...config,
+      delay: config.delay ?? 0,
+      unit: config.unit ?? 'days',
+      weekdays: config.weekdays ?? (config.weekday !== undefined ? [config.weekday] : undefined),
+      time: config.time,
       timezone,
     });
   }

@@ -176,11 +176,12 @@ export class FlowEngineService {
         // Get restaurant timezone
         const timezone = (context._timezone as string) ?? 'UTC';
 
-        const targetDate = await this.timerService.scheduleTimer(
+        const timerResult = await this.timerService.scheduleTimer(
           node, contact, executionId, timezone,
         );
 
-        if (targetDate) {
+        if (timerResult) {
+          const { targetDate } = timerResult;
           await this.logNodeExecution(
             execution, node, 'success',
             `Timer scheduled for ${targetDate.toISOString()}`,
