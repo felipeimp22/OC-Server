@@ -44,15 +44,19 @@ export class ContactRepository extends BaseRepository<IContactDocument> {
   /**
    * Upsert a contact by customerId. Used for syncing from OrderChop Customer.
    * Creates if not found, updates if already exists.
+   *
+   * @param onInsertData - Extra fields applied only on document creation (via $setOnInsert).
+   *                       Use for fields that should default on new contacts but not be overwritten on updates.
    */
   async upsertByCustomerId(
     restaurantId: Types.ObjectId | string,
     customerId: Types.ObjectId | string,
     data: Partial<IContactDocument>,
+    onInsertData?: Partial<IContactDocument>,
   ): Promise<IContactDocument> {
     const result = await this.model.findOneAndUpdate(
       { restaurantId, customerId } as FilterQuery<IContactDocument>,
-      { $set: data, $setOnInsert: { restaurantId, customerId } },
+      { $set: data, $setOnInsert: { restaurantId, customerId, ...onInsertData } },
       { new: true, upsert: true },
     ).exec();
     return result!;

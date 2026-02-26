@@ -67,14 +67,21 @@ export class CartEventConsumer {
   private async handleCartAbandoned(payload: Record<string, unknown>): Promise<void> {
     const restaurantId = payload.restaurantId as string;
     const customerId = payload.customerId as string;
-    if (!restaurantId || !customerId) return;
 
-    const contact = await this.contactService.getByCustomerId(restaurantId, customerId);
-    if (!contact) return;
+    if (!restaurantId || !customerId) {
+      log.warn({ restaurantId, customerId }, 'cart.abandoned missing restaurantId or customerId — skipping');
+      return;
+    }
+
+    const contact = await this.contactService.findByCustomerId(restaurantId, customerId);
+    if (!contact) {
+      log.warn({ restaurantId, customerId }, 'No contact found for cart.abandoned event — skipping trigger');
+      return;
+    }
 
     await this.triggerService.evaluateTriggers(
       restaurantId,
-      'cart_abandoned',
+      'abandoned_cart',
       contact._id.toString(),
       payload,
     );

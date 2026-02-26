@@ -29,6 +29,57 @@ export class ContactService {
   }
 
   /**
+   * Upsert a contact from a customer event (customer.created / customer.updated).
+   * Sets lifecycleStatus: 'lead' only on creation, never overwrites it on updates.
+   *
+   * @param restaurantId - Tenant ID
+   * @param customerData - Data from the customer event payload
+   * @returns The upserted CRM contact
+   */
+  async upsertFromCustomer(
+    restaurantId: string,
+    customerData: {
+      customerId: string;
+      name: string;
+      email: string;
+      phone?: { countryCode: string; number: string } | null;
+    },
+  ): Promise<IContactDocument> {
+    const [firstName, ...lastParts] = customerData.name.split(' ');
+    const lastName = lastParts.join(' ');
+
+    const contact = await this.contactRepo.upsertByCustomerId(
+      restaurantId,
+      customerData.customerId,
+      {
+        email: customerData.email,
+        firstName: firstName ?? '',
+        lastName,
+        phone: customerData.phone ?? null,
+      } as Partial<IContactDocument>,
+      { lifecycleStatus: 'lead' } as Partial<IContactDocument>,
+    );
+
+    log.info(
+      { restaurantId, contactId: contact._id, customerId: customerData.customerId },
+      'Contact upserted from customer event',
+    );
+
+    return contact;
+  }
+
+  /**
+   * Find a contact by their OrderChop customer ID.
+   * Returns null if not found or if wrong tenant.
+   */
+  async findByCustomerId(
+    restaurantId: string,
+    customerId: string,
+  ): Promise<IContactDocument | null> {
+    return this.contactRepo.findByCustomerId(restaurantId, customerId);
+  }
+
+  /**
    * Sync a contact from an OrderChop Customer event.
    * Creates or updates the CRM contact with data from the Customer collection.
    *

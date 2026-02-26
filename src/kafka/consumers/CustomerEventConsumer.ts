@@ -78,17 +78,18 @@ export class CustomerEventConsumer {
     const restaurantId = payload.restaurantId as string;
     const customerId = payload.customerId as string;
 
-    if (!restaurantId || !customerId) return;
+    if (!restaurantId || !customerId) {
+      log.warn({ restaurantId, customerId }, 'customer.created missing restaurantId or customerId — skipping');
+      return;
+    }
 
-    // Sync contact from customer data
-    const contact = await this.contactService.syncFromCustomer(restaurantId, {
+    const contact = await this.contactService.upsertFromCustomer(restaurantId, {
       customerId,
       name: (payload.name as string) ?? '',
       email: (payload.email as string) ?? '',
       phone: payload.phone as { countryCode: string; number: string } | null,
     });
 
-    // Evaluate triggers for customer_created
     await this.triggerService.evaluateTriggers(
       restaurantId,
       'customer_created',
@@ -101,9 +102,12 @@ export class CustomerEventConsumer {
     const restaurantId = payload.restaurantId as string;
     const customerId = payload.customerId as string;
 
-    if (!restaurantId || !customerId) return;
+    if (!restaurantId || !customerId) {
+      log.warn({ restaurantId, customerId }, 'customer.updated missing restaurantId or customerId — skipping');
+      return;
+    }
 
-    await this.contactService.syncFromCustomer(restaurantId, {
+    await this.contactService.upsertFromCustomer(restaurantId, {
       customerId,
       name: (payload.name as string) ?? '',
       email: (payload.email as string) ?? '',
