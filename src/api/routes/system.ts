@@ -49,7 +49,7 @@ export async function systemRoutes(app: FastifyInstance): Promise<void> {
     let synced = 0;
     for (const customer of customers) {
       try {
-        await contactService.syncFromCustomer(restaurantId, {
+        await contactService.upsertFromCustomer(restaurantId, {
           customerId: customer._id.toString(),
           name: customer.name ?? '',
           email: customer.email ?? '',
