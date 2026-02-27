@@ -6,7 +6,7 @@
  * the CRM engine checks if the `eventId` has already been processed.
  * If so, the event is skipped.
  *
- * A TTL index automatically removes old records after 7 days.
+ * A TTL index automatically removes old records after 90 days.
  *
  * @module domain/models/crm/ProcessedEvent
  */
@@ -20,15 +20,15 @@ export interface IProcessedEventDocument extends Document {
   eventId: string;
   /** Event type for debugging (e.g., "order.completed") */
   eventType: string;
-  /** When the event was processed */
-  processedAt: Date;
+  /** When the event was created/processed — used for TTL expiry */
+  createdAt: Date;
 }
 
 const ProcessedEventSchema = new Schema<IProcessedEventDocument>(
   {
     eventId: { type: String, required: true },
     eventType: { type: String, required: true },
-    processedAt: { type: Date, default: () => new Date() },
+    createdAt: { type: Date, default: () => new Date() },
   },
   {
     collection: 'crm_processed_events',
@@ -38,8 +38,8 @@ const ProcessedEventSchema = new Schema<IProcessedEventDocument>(
 
 /** Unique event ID for idempotency checks */
 ProcessedEventSchema.index({ eventId: 1 }, { unique: true });
-/** Auto-expire processed events after 7 days to keep the collection small */
-ProcessedEventSchema.index({ processedAt: 1 }, { expireAfterSeconds: 7 * 24 * 60 * 60 });
+/** Auto-expire processed events after 90 days to keep the collection manageable */
+ProcessedEventSchema.index({ createdAt: 1 }, { expireAfterSeconds: 90 * 24 * 60 * 60 });
 
 export const ProcessedEvent = mongoose.model<IProcessedEventDocument>(
   'CrmProcessedEvent',
