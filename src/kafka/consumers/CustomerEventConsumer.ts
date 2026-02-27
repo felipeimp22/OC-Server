@@ -50,20 +50,29 @@ export class CustomerEventConsumer {
       const event = JSON.parse(message.value.toString());
       const { eventType, payload } = event;
 
-      // Idempotency
-      const eventId = `customer:${eventType}:${payload?.customerId ?? message.offset}`;
-      const shouldProcess = await tryProcessEvent(eventId, eventType);
-      if (!shouldProcess) return;
+      // restaurantId is at the top-level of the Kafka message (set by the event bridge
+      // from the X-Restaurant-Id header), with payload.restaurantId as fallback
+      const restaurantId = (event.restaurantId ?? payload?.restaurantId) as string | undefined;
+
+      // Use the event's own UUID for idempotency; fall back to a synthetic key
+      const idempotencyKey: string = event.eventId
+        ?? `customer:${eventType}:${payload?.customerId ?? message.offset}`;
+
+      const shouldProcess = await tryProcessEvent(idempotencyKey, eventType);
+      if (!shouldProcess) {
+        log.debug({ idempotencyKey }, 'Duplicate event — skipping');
+        return;
+      }
 
       log.info({ eventType, customerId: payload?.customerId }, 'Processing customer event');
 
       switch (eventType) {
         case 'customer.created':
-          await this.handleCustomerCreated(payload);
+          await this.handleCustomerCreated(restaurantId, payload);
           break;
 
         case 'customer.updated':
-          await this.handleCustomerUpdated(payload);
+          await this.handleCustomerUpdated(restaurantId, payload);
           break;
 
         default:
@@ -74,8 +83,11 @@ export class CustomerEventConsumer {
     }
   }
 
-  private async handleCustomerCreated(payload: Record<string, unknown>): Promise<void> {
-    const restaurantId = payload.restaurantId as string;
+  private async handleCustomerCreated(
+    eventRestaurantId: string | undefined,
+    payload: Record<string, unknown>,
+  ): Promise<void> {
+    const restaurantId = (eventRestaurantId ?? payload.restaurantId) as string;
     const customerId = payload.customerId as string;
 
     if (!restaurantId || !customerId) {
@@ -98,8 +110,11 @@ export class CustomerEventConsumer {
     );
   }
 
-  private async handleCustomerUpdated(payload: Record<string, unknown>): Promise<void> {
-    const restaurantId = payload.restaurantId as string;
+  private async handleCustomerUpdated(
+    eventRestaurantId: string | undefined,
+    payload: Record<string, unknown>,
+  ): Promise<void> {
+    const restaurantId = (eventRestaurantId ?? payload.restaurantId) as string;
     const customerId = payload.customerId as string;
 
     if (!restaurantId || !customerId) {

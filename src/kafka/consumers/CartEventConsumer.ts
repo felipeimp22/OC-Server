@@ -50,22 +50,35 @@ export class CartEventConsumer {
       const event = JSON.parse(message.value.toString());
       const { eventType, payload } = event;
 
-      const eventId = `cart:${eventType}:${payload?.cartId ?? message.offset}`;
-      const shouldProcess = await tryProcessEvent(eventId, eventType);
-      if (!shouldProcess) return;
+      // restaurantId is at the top-level of the Kafka message (set by the event bridge
+      // from the X-Restaurant-Id header), with payload.restaurantId as fallback
+      const restaurantId = (event.restaurantId ?? payload?.restaurantId) as string | undefined;
+
+      // Use the event's own UUID for idempotency; fall back to a synthetic key
+      const idempotencyKey: string = event.eventId
+        ?? `cart:${eventType}:${payload?.cartId ?? message.offset}`;
+
+      const shouldProcess = await tryProcessEvent(idempotencyKey, eventType);
+      if (!shouldProcess) {
+        log.debug({ idempotencyKey }, 'Duplicate event — skipping');
+        return;
+      }
 
       log.info({ eventType }, 'Processing cart event');
 
       if (eventType === 'cart.abandoned') {
-        await this.handleCartAbandoned(payload);
+        await this.handleCartAbandoned(restaurantId, payload);
       }
     } catch (err) {
       log.error({ err }, 'Error processing cart event');
     }
   }
 
-  private async handleCartAbandoned(payload: Record<string, unknown>): Promise<void> {
-    const restaurantId = payload.restaurantId as string;
+  private async handleCartAbandoned(
+    eventRestaurantId: string | undefined,
+    payload: Record<string, unknown>,
+  ): Promise<void> {
+    const restaurantId = (eventRestaurantId ?? payload.restaurantId) as string;
     const customerId = payload.customerId as string;
 
     if (!restaurantId || !customerId) {
