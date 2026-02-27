@@ -51,11 +51,17 @@ export class OrderEventConsumer {
       const event = JSON.parse(message.value.toString());
       const { eventType, payload } = event;
 
-      // Idempotency check
-      const eventId = `${topic}:${eventType}:${payload?.orderId ?? message.offset}`;
-      const shouldProcess = await tryProcessEvent(eventId, eventType);
+      // restaurantId is at the top-level of the Kafka message (set by the event bridge
+      // from the X-Restaurant-Id header), with payload.restaurantId as fallback
+      const restaurantId = (event.restaurantId ?? payload?.restaurantId) as string | undefined;
+
+      // Use the event's own UUID for idempotency; fall back to a synthetic key
+      const idempotencyKey: string = event.eventId
+        ?? `${topic}:${eventType}:${payload?.orderId ?? message.offset}`;
+
+      const shouldProcess = await tryProcessEvent(idempotencyKey, eventType);
       if (!shouldProcess) {
-        log.debug({ eventId }, 'Duplicate event — skipping');
+        log.debug({ idempotencyKey }, 'Duplicate event — skipping');
         return;
       }
 
@@ -64,31 +70,31 @@ export class OrderEventConsumer {
       switch (eventType) {
         case 'order.created':
         case 'order.confirmed':
-          await this.handleOrderEvent(eventType, payload);
+          await this.handleOrderEvent(eventType, payload, restaurantId);
           break;
 
         case 'order.completed':
-          await this.handleOrderCompleted(payload);
+          await this.handleOrderCompleted(payload, restaurantId);
           break;
 
         case 'order.cancelled':
-          await this.handleOrderEvent('order_cancelled', payload);
+          await this.handleOrderEvent('order_cancelled', payload, restaurantId);
           break;
 
         case 'order.status_changed':
-          await this.handleOrderEvent('order_status_changed', payload);
+          await this.handleOrderEvent('order_status_changed', payload, restaurantId);
           break;
 
         case 'payment.succeeded':
-          await this.handleOrderEvent('payment_succeeded', payload);
+          await this.handleOrderEvent('payment_succeeded', payload, restaurantId);
           break;
 
         case 'payment.failed':
-          await this.handlePaymentFailed(payload);
+          await this.handlePaymentFailed(payload, restaurantId);
           break;
 
         case 'payment.refunded':
-          await this.handleOrderEvent('payment_refunded', payload);
+          await this.handleOrderEvent('payment_refunded', payload, restaurantId);
           break;
 
         default:
@@ -102,8 +108,11 @@ export class OrderEventConsumer {
   /**
    * Handle order.completed — upsert contact, update stats, trigger flows.
    */
-  private async handleOrderCompleted(payload: Record<string, unknown>): Promise<void> {
-    const restaurantId = payload.restaurantId as string;
+  private async handleOrderCompleted(
+    payload: Record<string, unknown>,
+    eventRestaurantId?: string,
+  ): Promise<void> {
+    const restaurantId = (eventRestaurantId ?? payload.restaurantId) as string;
     const customerId = payload.customerId as string;
 
     if (!restaurantId || !customerId) {
@@ -119,7 +128,7 @@ export class OrderEventConsumer {
     });
 
     // Update order stats
-    const orderTotal = (payload.total as number) ?? 0;
+    const orderTotal = (payload.orderTotal as number) ?? 0;
     const updatedContact = await this.contactService.incrementOrderStats(
       restaurantId,
       contact._id.toString(),
@@ -149,8 +158,11 @@ export class OrderEventConsumer {
   /**
    * Handle payment.failed — evaluate payment_failed triggers.
    */
-  private async handlePaymentFailed(payload: Record<string, unknown>): Promise<void> {
-    const restaurantId = payload.restaurantId as string;
+  private async handlePaymentFailed(
+    payload: Record<string, unknown>,
+    eventRestaurantId?: string,
+  ): Promise<void> {
+    const restaurantId = (eventRestaurantId ?? payload.restaurantId) as string;
     const customerId = payload.customerId as string;
 
     if (!restaurantId || !customerId) {
@@ -170,8 +182,12 @@ export class OrderEventConsumer {
   /**
    * Handle generic order events — just evaluate triggers.
    */
-  private async handleOrderEvent(eventType: string, payload: Record<string, unknown>): Promise<void> {
-    const restaurantId = payload.restaurantId as string;
+  private async handleOrderEvent(
+    eventType: string,
+    payload: Record<string, unknown>,
+    eventRestaurantId?: string,
+  ): Promise<void> {
+    const restaurantId = (eventRestaurantId ?? payload.restaurantId) as string;
     const customerId = payload.customerId as string;
     if (!restaurantId || !customerId) {
       log.warn({ restaurantId, customerId, eventType }, 'Order event missing restaurantId or customerId — skipping');
