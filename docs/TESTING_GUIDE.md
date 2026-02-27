@@ -1,4 +1,4 @@
-# OC-CRM-Engine — Testing Guide
+# OC-Server CRM Engine — Testing Guide
 
 How to manually test the CRM engine end-to-end: REST API via Insomnia/Postman, Kafka event simulation, BullMQ job verification, and full pipeline testing.
 
@@ -14,7 +14,8 @@ How to manually test the CRM engine end-to-end: REST API via Insomnia/Postman, K
 6. [BullMQ Timer Job Testing](#6-bullmq-timer-job-testing)
 7. [Full Pipeline Testing (Event → Flow → Action)](#7-full-pipeline-testing)
 8. [Seed Data](#8-seed-data)
-9. [Troubleshooting](#9-troubleshooting)
+9. [Testing the Event Bridge from oc-restaurant-manager](#9-testing-the-event-bridge)
+10. [Troubleshooting](#10-troubleshooting)
 
 ---
 
@@ -690,7 +691,131 @@ GET /api/v1/flows
 
 ---
 
-## 9. Troubleshooting
+## 9. Testing the Event Bridge from oc-restaurant-manager
+
+The Event Bridge is the HTTP path from `oc-restaurant-manager` → oc-server → Kafka. This tests the real production flow for order/payment/customer events.
+
+### How the Bridge Works
+
+1. `publishEvent(restaurantId, eventType, payload)` in `oc-restaurant-manager/lib/services/eventPublisher.ts` writes to the Prisma `CRMEvent` outbox and fires `deliverEvent()`.
+2. `deliverEvent()` POSTs `{ eventId, eventType, payload }` to `POST /api/v1/events/ingest` with a system JWT signed using `AUTH_SECRET`.
+3. oc-server routes the event to the correct Kafka topic and returns `{ ok: true }`.
+4. Failed deliveries are retried by `GET /api/cron/crm-events` (protected by `CRON_SECRET`).
+
+### Prerequisites
+
+Both services must be running and share the same `AUTH_SECRET`:
+- `oc-restaurant-manager`: `npm run dev` (default port 3000)
+- `oc-server`: `npm run dev` (default port 3001)
+
+### Step 1: Verify the ingest endpoint
+
+Call the ingest endpoint directly with a test event using a manually signed token:
+
+```bash
+# Generate a system token (run in oc-server directory)
+node -e "
+import { SignJWT } from 'jose';
+const key = new TextEncoder().encode(process.env.AUTH_SECRET);
+const token = await new SignJWT({ system: true })
+  .setProtectedHeader({ alg: 'HS256' })
+  .setSubject('system-event-publisher')
+  .setExpirationTime('5m')
+  .sign(key);
+console.log(token);
+" --input-type=module
+```
+
+Then post to the ingest endpoint:
+
+```bash
+curl -X POST http://localhost:3001/api/v1/events/ingest \
+  -H "Authorization: Bearer <system-token>" \
+  -H "X-Restaurant-Id: <your-restaurant-id>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "eventId": "test-event-1",
+    "eventType": "order.completed",
+    "payload": {
+      "restaurantId": "<your-restaurant-id>",
+      "customerId": "<existing-customer-id>",
+      "orderId": "test-order-1",
+      "total": 29.99,
+      "orderType": "delivery"
+    }
+  }'
+```
+
+Expected response: `{ "ok": true }`
+
+### Step 2: Trigger via oc-restaurant-manager
+
+Use `publishEvent()` directly in a Next.js server action or API route:
+
+```typescript
+// In oc-restaurant-manager — e.g., a test API route or server action
+import { publishEvent, CRMEventType } from '@/lib/services/eventPublisher';
+
+publishEvent(restaurantId, CRMEventType.ORDER_COMPLETED, {
+  orderId: 'test-order-123',
+  orderNumber: 'ORD-001',
+  customerId: existingCustomerId,
+  customerEmail: 'test@example.com',
+  customerName: 'Test Customer',
+  orderType: 'delivery',
+  orderTotal: 45.99,
+  paymentStatus: 'paid',
+  status: 'completed',
+});
+```
+
+### Step 3: Verify delivery
+
+1. Check the Prisma outbox in oc-restaurant-manager's database:
+   ```sql
+   SELECT eventId, eventType, status, attempts, deliveredAt
+   FROM CRMEvent ORDER BY createdAt DESC LIMIT 5;
+   ```
+   Look for `status: 'delivered'`.
+
+2. Watch oc-server logs (`LOG_LEVEL=debug`) for the consumer processing the event:
+   ```
+   [OrderEventConsumer] Processing event: order.completed
+   [TriggerService] Matched N flows for trigger "order_completed"
+   [FlowEngineService] Enrolling contact into flow ...
+   ```
+
+3. Verify in MongoDB:
+   ```javascript
+   db.crm_flow_executions.find({ restaurantId: ObjectId("...") }).sort({ createdAt: -1 }).limit(3)
+   ```
+
+### Step 4: Test the retry cron
+
+To simulate a retry cycle (when oc-server is temporarily down):
+
+```bash
+# Trigger the retry cron manually
+curl -H "Authorization: Bearer <cron-secret>" \
+  http://localhost:3000/api/cron/crm-events
+```
+
+Expected response: `{ "retried": N }`
+
+### Automated Smoke Test
+
+Run the full pipeline smoke test (requires running infrastructure):
+
+```bash
+cd oc-server
+npm run smoke-test <restaurantId> <authToken>
+```
+
+This tests sync-contacts, seed, flow creation/activation, Kafka event publishing, execution polling, tag verification, timeline, and analytics overview.
+
+---
+
+## 10. Troubleshooting
 
 ### Common Issues
 

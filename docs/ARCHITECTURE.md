@@ -3,15 +3,16 @@
 ## System Overview
 
 ```
-┌──────────────────────┐      ┌──────────────────────┐
-│    oc-webapp (Next)   │      │  oc-server (Express)  │
-│   (Frontend + Auth)   │      │   (Orders/Payments)   │
-└──────────┬───────────┘      └──────────┬───────────┘
-           │ JWT                          │ Kafka Events
-           ▼                              ▼
+┌──────────────────────────────────────┐
+│   oc-restaurant-manager (Next.js)    │
+│   (Frontend + Auth + Event Outbox)   │
+└────────────────┬─────────────────────┘
+                 │ HTTP POST /api/v1/events/ingest
+                 │ (system JWT + X-Restaurant-Id)
+                 ▼
 ┌──────────────────────────────────────────────────────┐
-│                    oc-crm-engine                      │
-│                  (This Service)                       │
+│                    oc-server                          │
+│               (CRM Engine — This Service)             │
 │                                                       │
 │  ┌─────────┐  ┌──────────┐  ┌──────────┐  ┌───────┐ │
 │  │ Fastify  │  │  Kafka   │  │  BullMQ  │  │ Cron  │ │
@@ -30,14 +31,43 @@
 │           │ Repositories  │                            │
 │           │ (MongoDB)     │                            │
 │           └───────────────┘                            │
+│                    │                                   │
+│                    ▼                                   │
+│           ┌───────────────┐                            │
+│           │     Kafka     │                            │
+│           │  (Publish)    │                            │
+│           └───────────────┘                            │
 └──────────────────────────────────────────────────────┘
 ```
+
+## Event Bridge (Outbox → HTTP → Kafka)
+
+Events from `oc-restaurant-manager` reach Kafka via a two-hop bridge:
+
+```
+oc-restaurant-manager
+  1. publishEvent() writes to Prisma CRMEvent outbox
+  2. deliverEvent() POSTs to oc-server /api/v1/events/ingest
+         │
+         ▼
+  oc-server /api/v1/events/ingest
+  3. Validates system JWT
+  4. Routes event to the correct Kafka topic
+  5. Returns { ok: true }
+         │
+         ▼
+  Kafka consumers (oc-server)
+  6. OrderEventConsumer, CustomerEventConsumer, CartEventConsumer, etc.
+  7. Process event → update contacts → evaluate triggers → enroll flows
+```
+
+Retry path: if HTTP delivery fails, the `/api/cron/crm-events` cron in `oc-restaurant-manager` retries pending outbox events every minute.
 
 ## Data Flow
 
 ### Event Processing Pipeline
 
-1. **Event arrives** via Kafka (order_completed, customer_created, etc.)
+1. **Event arrives** via Kafka (order.completed, customer.created, etc.)
 2. **Consumer** deserializes and validates the event payload
 3. **Idempotency guard** checks if event was already processed (ProcessedEvent collection)
 4. **Contact resolution** — find or create the CRM contact for this customer
@@ -59,8 +89,8 @@ Timer Node Hit → BullMQ Job Created → [delay/schedule] → Worker Picks Up �
 
 Timer types:
 - **Delay**: Fixed wait (5 minutes, 2 hours, 3 days)
-- **Schedule**: Wait until specific time/day (e.g., "next Tuesday at 10am")
-- **Date**: Relative to a contact date field (e.g., "birthday - 1 day")
+- **Smart Date Sequence**: Wait until specific weekday + time in timezone
+- **Date Field**: Relative to a contact custom field date value
 
 ## Multi-Tenancy
 
@@ -119,9 +149,9 @@ Flows are directed acyclic graphs (DAGs):
 |------|---------|-----------|
 | Trigger | Entry point | 18 event types |
 | Action | Execute task | 11 action types |
-| Condition | Branch logic | yes/no, multi-branch, A/B split |
-| Timer | Delay execution | delay, schedule, date-relative |
-| Logic | Control flow | loop, stop, skip, until, smart date |
+| Condition | Branch logic | yes_no, multi_branch, ab_split, random_distribution |
+| Timer | Delay execution | delay, date_field, smart_date_sequence |
+| Logic | Control flow | loop, stop, skip, until_condition |
 
 ### Edge Resolution
 
@@ -132,13 +162,19 @@ Each node can have multiple outgoing edges. The engine:
 
 ## Kafka Topics
 
+All topic names are defined in `src/kafka/topics.ts` (`KAFKA_TOPICS`):
+
 | Topic | Direction | Purpose |
 |-------|-----------|---------|
-| `order-events` | Consume | Order lifecycle events |
-| `customer-events` | Consume | Customer creation/updates |
-| `cart-events` | Consume | Cart abandonment detection |
-| `crm-events` | Produce/Consume | Internal CRM events (tag applied, field changed) |
-| `flow-events` | Produce | Flow execution events (for audit/analytics) |
+| `orderchop.orders` | Consume | Order lifecycle events |
+| `orderchop.payments` | Consume | Payment events |
+| `orderchop.customers` | Consume | Customer creation/updates |
+| `orderchop.carts` | Consume | Cart abandonment detection |
+| `crm.flow.execute` | Internal | Flow step execution queue |
+| `crm.flow.timer` | Internal | Timer job fire events |
+| `crm.contacts` | Internal | Contact tag/field change events |
+| `crm.communications` | Internal | Communication dispatch |
+| `crm.notifications` | Produce | Outgoing notifications to oc-restaurant-manager |
 
 ## Service Layer
 

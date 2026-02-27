@@ -1,6 +1,6 @@
 # Integration Guide
 
-## Connecting to oc-crm-engine from oc-webapp
+## Connecting to oc-server (CRM Engine) from oc-restaurant-manager
 
 ### Authentication
 
@@ -17,14 +17,20 @@ const headers = {
 ### Base URL
 
 ```
-Development: http://localhost:4000/api
-Production:  https://crm.orderchop.com/api  (or your deployment URL)
+Development: http://localhost:3001
+Production:  Set via CRM_ENGINE_URL environment variable
+```
+
+In `oc-restaurant-manager`, the base URL is configured via `CRM_ENGINE_URL`:
+
+```env
+CRM_ENGINE_URL=http://localhost:3001
 ```
 
 ### Example: Creating a Flow
 
 ```typescript
-const response = await fetch(`${CRM_BASE_URL}/api/flows`, {
+const response = await fetch(`${process.env.CRM_ENGINE_URL}/api/v1/flows`, {
   method: 'POST',
   headers,
   body: JSON.stringify({
@@ -74,9 +80,10 @@ const params = new URLSearchParams({
   order: 'desc',
 });
 
-const response = await fetch(`${CRM_BASE_URL}/api/contacts?${params}`, {
-  headers,
-});
+const response = await fetch(
+  `${process.env.CRM_ENGINE_URL}/api/v1/contacts?${params}`,
+  { headers },
+);
 
 const { data, total, page, limit, totalPages, hasMore } = await response.json();
 ```
@@ -84,8 +91,8 @@ const { data, total, page, limit, totalPages, hasMore } = await response.json();
 ### Example: Updating a Contact
 
 ```typescript
-await fetch(`${CRM_BASE_URL}/api/contacts/${contactId}`, {
-  method: 'PATCH',
+await fetch(`${process.env.CRM_ENGINE_URL}/api/v1/contacts/${contactId}`, {
+  method: 'PUT',
   headers,
   body: JSON.stringify({
     customFields: {
@@ -97,40 +104,80 @@ await fetch(`${CRM_BASE_URL}/api/contacts/${contactId}`, {
 });
 ```
 
-## Kafka Event Format
+---
 
-Events published to Kafka by the main oc-server should follow this format:
+## Kafka Event Bridge
+
+Events from `oc-restaurant-manager` reach oc-server's Kafka pipeline via an HTTP bridge using the **Transactional Outbox pattern**.
+
+### Flow
+
+```
+oc-restaurant-manager
+  1. publishEvent(restaurantId, eventType, payload)
+     → writes CRMEvent record to Prisma outbox (status: 'pending')
+  2. deliverEvent() POSTs to oc-server /api/v1/events/ingest
+     → system JWT signed with AUTH_SECRET
+  3. On success: outbox status → 'delivered'
+     On failure: outbox status → 'failed' (retry cron picks up)
+
+oc-server /api/v1/events/ingest
+  4. Validates system JWT (no X-Restaurant-Id tenancy check — restaurantId in payload)
+  5. Routes eventType to correct Kafka topic:
+     - order.*      → orderchop.orders
+     - payment.*    → orderchop.payments
+     - customer.*   → orderchop.customers
+     - cart.*       → orderchop.carts
+  6. Returns { ok: true } or { ok: false, error: '...' }
+
+Retry path (oc-restaurant-manager)
+  - GET /api/cron/crm-events runs every minute
+  - retryPendingEvents() re-attempts failed/pending outbox events
+  - Max 5 attempts; after that → status: 'dead_letter'
+```
+
+### Event Message Schema
+
+All events sent to the `/api/v1/events/ingest` endpoint follow this shape:
 
 ```typescript
-interface OrderEvent {
-  eventId: string;      // UUID — used for idempotency
-  eventType: string;    // e.g., 'order_completed', 'order_status_changed'
-  restaurantId: string; // MongoDB ObjectId as string
-  customerId: string;   // MongoDB ObjectId as string
-  orderId?: string;
-  data: {
-    // Event-specific payload
-    total?: number;
-    orderNumber?: string;
-    orderType?: string;
-    status?: string;
-    previousStatus?: string;
-    // ... additional fields
+interface KafkaEvent {
+  eventId: string;      // UUID — used for idempotency (deduplication)
+  eventType: string;    // e.g., 'order.completed', 'customer.created'
+  payload: {
+    restaurantId: string; // MongoDB ObjectId string (required)
+    customerId?: string;  // MongoDB ObjectId string
+    [key: string]: unknown; // Event-specific data
   };
-  timestamp: string;    // ISO 8601
 }
 ```
 
+### Kafka Topic Routing
+
+| eventType prefix | Kafka Topic |
+|-----------------|-------------|
+| `order.*` | `orderchop.orders` |
+| `payment.*` | `orderchop.payments` |
+| `customer.*` | `orderchop.customers` |
+| `cart.*` | `orderchop.carts` |
+
 ### Required Kafka Topics
 
-Ensure these topics exist in your Kafka cluster:
+All 9 topics are auto-created by `ensureTopics()` on startup (`ENABLE_KAFKA=true`):
 
 | Topic | Producer | Consumer |
 |-------|----------|----------|
-| `order-events` | oc-server | oc-crm-engine |
-| `customer-events` | oc-server | oc-crm-engine |
-| `cart-events` | oc-server | oc-crm-engine |
-| `crm-events` | oc-crm-engine | oc-crm-engine |
+| `orderchop.orders` | oc-restaurant-manager (via bridge) | oc-server |
+| `orderchop.payments` | oc-restaurant-manager (via bridge) | oc-server |
+| `orderchop.customers` | oc-restaurant-manager (via bridge) | oc-server |
+| `orderchop.carts` | oc-restaurant-manager (via bridge) | oc-server |
+| `crm.flow.execute` | oc-server | oc-server |
+| `crm.flow.timer` | oc-server | oc-server |
+| `crm.contacts` | oc-server | oc-server |
+| `crm.communications` | oc-server | oc-server |
+| `crm.notifications` | oc-server | oc-restaurant-manager |
+
+---
 
 ## Template Variables
 
@@ -142,41 +189,26 @@ Available variables for email/SMS templates:
 | `{{first_name}}` | Contact's first name |
 | `{{last_name}}` | Contact's last name |
 | `{{email}}` | Contact's email |
-| `{{phone}}` | Contact's phone |
-| `{{lifecycle_status}}` | Current lifecycle status |
-| `{{total_orders}}` | Total order count |
-| `{{lifetime_value}}` | Total spend |
-
-### Restaurant Variables
-| Variable | Description |
-|----------|-------------|
 | `{{restaurant_name}}` | Restaurant name |
-| `{{restaurant_phone}}` | Restaurant phone |
-| `{{restaurant_email}}` | Restaurant email |
 
 ### Order Variables (when triggered by order events)
 | Variable | Description |
 |----------|-------------|
 | `{{order_total}}` | Order total amount |
 | `{{order_number}}` | Order number |
-| `{{order_type}}` | delivery/pickup/dine-in |
-| `{{order_date}}` | Order date |
-
-### Special Variables
-| Variable | Description |
-|----------|-------------|
 | `{{review_link}}` | Auto-generated review link |
-| `{{promo_code}}` | Promotional code |
 | `{{unsubscribe_link}}` | Unsubscribe URL |
 
 ### Custom Fields
-Any custom field defined for the restaurant is available as `{{field_key}}`.
+Any custom field defined for the restaurant is available as `{{field_key}}`. Unknown variables are replaced with an empty string.
+
+---
 
 ## Docker Deployment
 
 ```bash
 # Build the image
-docker build -t oc-crm-engine .
+docker build -t oc-server .
 
 # Run with docker-compose
 docker-compose up -d
