@@ -131,6 +131,7 @@ export class ContactRepository extends BaseRepository<IContactDocument> {
 
   /**
    * Find inactive contacts (no order in X days).
+   * Excludes contacts with no orders (lastOrderAt is null).
    * Used by the InactivityChecker scheduler.
    */
   async findInactive(
@@ -141,8 +142,7 @@ export class ContactRepository extends BaseRepository<IContactDocument> {
     cutoffDate.setDate(cutoffDate.getDate() - daysSinceLastOrder);
 
     return this.find(restaurantId, {
-      lastOrderAt: { $lt: cutoffDate },
-      lifecycleStatus: { $nin: ['lead', 'lost'] },
+      lastOrderAt: { $ne: null, $lt: cutoffDate },
     } as FilterQuery<IContactDocument>);
   }
 
