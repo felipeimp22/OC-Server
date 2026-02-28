@@ -407,6 +407,31 @@ describe('US-016: REST API — Flows', () => {
       expect(res.statusCode).toBe(422);
       expect(res.json()).toMatchObject({ error: 'INVALID_GRAPH', rule: 'R-1' });
     });
+
+    it('returns 422 INVALID_GRAPH rule R-4 when action node has outgoing edge', async () => {
+      const draft = { _id: 'f1', name: 'Draft Flow', status: 'draft' };
+      mockFlowService.getById.mockResolvedValue(draft);
+
+      const res = await app.inject({
+        method: 'PUT',
+        url: '/api/v1/flows/f1',
+        payload: {
+          name: 'Updated',
+          nodes: [
+            { id: 'n1', type: 'trigger', subType: 'order_completed' },
+            { id: 'n2', type: 'action', subType: 'send_email', label: 'Send Email' },
+            { id: 'n3', type: 'action', subType: 'send_sms', label: 'Send SMS' },
+          ],
+          edges: [
+            { id: 'e1', sourceNodeId: 'n1', targetNodeId: 'n2' },
+            { id: 'e2', sourceNodeId: 'n2', targetNodeId: 'n3' },
+          ],
+        },
+      });
+
+      expect(res.statusCode).toBe(422);
+      expect(res.json()).toMatchObject({ error: 'INVALID_GRAPH', rule: 'R-4' });
+    });
   });
 
   // ── DELETE /api/v1/flows/:id ─────────────────────────────────────────────
