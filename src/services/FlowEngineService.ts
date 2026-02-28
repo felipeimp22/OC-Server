@@ -118,8 +118,8 @@ export class FlowEngineService {
    * @param executionId - The flow execution ID
    */
   async processCurrentNode(executionId: string): Promise<void> {
-    // 1. Load execution
-    const execution = await this.executionRepo.findOne('', { _id: executionId } as any);
+    // 1. Load execution (tenant-free lookup — executionId is the primary key here)
+    const execution = await this.executionRepo.findByExecutionId(executionId);
     if (!execution) {
       log.warn({ executionId }, 'Execution not found');
       return;
