@@ -58,7 +58,11 @@ const response = await fetch(`${process.env.CRM_ENGINE_URL}/api/v1/flows`, {
         type: 'action',
         subType: 'send_email',
         label: 'Thank You Email',
-        config: { templateId: '<template-id>' },
+        config: {
+          recipients: [{ type: 'customer' }],
+          subject: 'Thanks for your order, {{customer.first_name}}!',
+          body: 'Hi {{customer.first_name}}, your order #{{order.number}} is on its way!',
+        },
         position: { x: 100, y: 400 },
       },
     ],
@@ -163,7 +167,7 @@ interface KafkaEvent {
 
 ### Required Kafka Topics
 
-All 9 topics are auto-created by `ensureTopics()` on startup (`ENABLE_KAFKA=true`):
+All 8 topics are auto-created by `ensureTopics()` on startup (`ENABLE_KAFKA=true`):
 
 | Topic | Producer | Consumer |
 |-------|----------|----------|
@@ -171,36 +175,39 @@ All 9 topics are auto-created by `ensureTopics()` on startup (`ENABLE_KAFKA=true
 | `orderchop.payments` | oc-restaurant-manager (via bridge) | oc-server |
 | `orderchop.customers` | oc-restaurant-manager (via bridge) | oc-server |
 | `orderchop.carts` | oc-restaurant-manager (via bridge) | oc-server |
-| `crm.flow.execute` | oc-server | oc-server |
+| `crm.flow.execute` | oc-server | oc-server (CRMEventConsumer — flow.step.ready only) |
 | `crm.flow.timer` | oc-server | oc-server |
-| `crm.contacts` | oc-server | oc-server |
 | `crm.communications` | oc-server | oc-server |
 | `crm.notifications` | oc-server | oc-restaurant-manager |
 
 ---
 
-## Template Variables
+## Trigger-Scoped Variables
 
-Available variables for email/SMS templates:
+Email/SMS inline composers use `{{dot.notation}}` variables scoped to the trigger type. All triggers include universal variables:
 
-### Contact Variables
+### Universal Variables (all triggers)
 | Variable | Description |
 |----------|-------------|
-| `{{first_name}}` | Contact's first name |
-| `{{last_name}}` | Contact's last name |
-| `{{email}}` | Contact's email |
-| `{{restaurant_name}}` | Restaurant name |
+| `{{customer.first_name}}` | Contact's first name |
+| `{{customer.last_name}}` | Contact's last name |
+| `{{customer.email}}` | Contact's email |
+| `{{customer.phone}}` | Contact's phone |
+| `{{restaurant.name}}` | Restaurant name |
+| `{{restaurant.owner_name}}` | Restaurant owner's name |
+| `{{restaurant.phone}}` | Restaurant phone |
 
-### Order Variables (when triggered by order events)
-| Variable | Description |
-|----------|-------------|
-| `{{order_total}}` | Order total amount |
-| `{{order_number}}` | Order number |
-| `{{review_link}}` | Auto-generated review link |
-| `{{unsubscribe_link}}` | Unsubscribe URL |
+### Trigger-Specific Variables
 
-### Custom Fields
-Any custom field defined for the restaurant is available as `{{field_key}}`. Unknown variables are replaced with an empty string.
+| Trigger | Additional Variables |
+|---------|---------------------|
+| `order_completed`, `first_order`, `nth_order` | `{{order.total}}`, `{{order.number}}`, `{{order.items_summary}}`, `{{order.date}}` |
+| `payment_failed` | `{{order.total}}`, `{{order.number}}`, `{{payment.failure_reason}}` |
+| `order_status_changed` | `{{order.number}}`, `{{order.status}}` |
+| `abandoned_cart` | `{{cart.items_summary}}`, `{{cart.total}}`, `{{cart.abandon_time}}` |
+| `no_order_in_x_days` | `{{customer.last_order_date}}`, `{{customer.days_since_order}}` |
+
+Unknown variables are replaced with an empty string.
 
 ---
 

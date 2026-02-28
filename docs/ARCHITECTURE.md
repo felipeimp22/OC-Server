@@ -75,10 +75,9 @@ Retry path: if HTTP delivery fails, the `/api/cron/crm-events` cron in `oc-resta
 6. **Flow enrollment** — create a FlowExecution for each matching flow
 7. **Node processing** — the Flow Engine traverses the DAG node by node:
    - **Trigger**: Already matched, advance to next node
-   - **Action**: Execute via ActionService (send email, apply tag, etc.)
-   - **Condition**: Evaluate via ConditionService, choose branch
+   - **Action**: Execute via ActionService (send_email, send_sms, outgoing_webhook); action nodes are terminal (no outgoing edges)
+   - **Condition**: Evaluate via ConditionService using trigger-bound semantics; yes/no branch selection
    - **Timer**: Schedule via BullMQ, pause execution until timer fires
-   - **Logic**: Handle branching (A/B split, loop, stop, etc.)
 8. **Completion** — when no more downstream nodes, mark execution as completed
 
 ### Timer Flow
@@ -89,8 +88,7 @@ Timer Node Hit → BullMQ Job Created → [delay/schedule] → Worker Picks Up �
 
 Timer types:
 - **Delay**: Fixed wait (5 minutes, 2 hours, 3 days)
-- **Smart Date Sequence**: Wait until specific weekday + time in timezone
-- **Date Field**: Relative to a contact custom field date value
+- **Date Field**: Wait until a specific UTC date/time (`config.targetDateUtc`)
 
 ## Multi-Tenancy
 
@@ -132,26 +130,25 @@ Prefixed with `crm_` to avoid collisions:
 Flows are directed acyclic graphs (DAGs):
 
 ```
-[Trigger: Order Completed]
+[Trigger: Order Completed (minOrderTotal: 0)]
          │
-    [Timer: Wait 2h]
+    [Timer: Delay 2h]
          │
-    [Condition: Order > $30?]
+    [Condition: Yes/No]
         / \
      Yes   No
       │     │
- [Send Email] [Apply Tag: "low_value"]
+ [Send Email] [Send SMS]
 ```
 
 ### Node Types
 
 | Type | Purpose | Sub-types |
 |------|---------|-----------|
-| Trigger | Entry point | 18 event types |
-| Action | Execute task | 11 action types |
-| Condition | Branch logic | yes_no, multi_branch, ab_split, random_distribution |
-| Timer | Delay execution | delay, date_field, smart_date_sequence |
-| Logic | Control flow | loop, stop, skip, until_condition |
+| Trigger | Entry point | 7 event types: order_completed, payment_failed, order_status_changed, abandoned_cart, first_order, nth_order, no_order_in_x_days |
+| Action | Execute task | 3 action types: send_email, send_sms, outgoing_webhook |
+| Condition | Branch logic | yes_no (trigger-bound — reads filter from trigger node config; no operator UI) |
+| Timer | Delay execution | delay, date_field |
 
 ### Edge Resolution
 
@@ -170,9 +167,8 @@ All topic names are defined in `src/kafka/topics.ts` (`KAFKA_TOPICS`):
 | `orderchop.payments` | Consume | Payment events |
 | `orderchop.customers` | Consume | Customer creation/updates |
 | `orderchop.carts` | Consume | Cart abandonment detection |
-| `crm.flow.execute` | Internal | Flow step execution queue |
+| `crm.flow.execute` | Consume/Produce | Flow step execution queue (flow.step.ready events) |
 | `crm.flow.timer` | Internal | Timer job fire events |
-| `crm.contacts` | Internal | Contact tag/field change events |
 | `crm.communications` | Internal | Communication dispatch |
 | `crm.notifications` | Produce | Outgoing notifications to oc-restaurant-manager |
 
@@ -180,17 +176,14 @@ All topic names are defined in `src/kafka/topics.ts` (`KAFKA_TOPICS`):
 
 | Service | Responsibility |
 |---------|---------------|
-| FlowService | Flow CRUD, activation, validation |
+| FlowService | Flow CRUD, activation, graph validation (9 rules R-1..R-9) |
 | FlowEngineService | DAG traversal and node execution orchestration |
 | TriggerService | Event → flow matching and enrollment |
-| ActionService | Action node execution dispatch |
-| ConditionService | Condition evaluation and branch selection |
-| CommunicationService | Email/SMS sending with template interpolation |
-| ContactService | Contact CRUD and lifecycle management |
-| SegmentationService | Dynamic contact filtering |
+| ActionService | Action node execution: send_email, send_sms, outgoing_webhook |
+| ConditionService | Trigger-bound yes/no evaluation (reads from triggerNode.config) |
+| CommunicationService | Email/SMS sending with dot-notation variable interpolation |
+| TimezoneService | Restaurant timezone lookup with 5-min TTL cache |
 | AnalyticsService | Dashboard stats and flow metrics |
-| TimerService | Timer scheduling and management |
-| WebhookService | Outgoing webhook execution |
-| CampaignService | Campaign management |
-| TemplateService | Communication template CRUD |
-| ReviewRequestService | Review request management |
+| TimerService | Timer scheduling via BullMQ (delay + date_field subtypes) |
+| WebhookService | Outgoing webhook execution with variable interpolation |
+| InactivityChecker | Daily cron (0 8 * * *) for no_order_in_x_days enrollment |

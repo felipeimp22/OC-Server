@@ -447,13 +447,12 @@ Kafka events are what trigger the flow engine. Without Kafka, the CRM API works 
 
 | Topic                 | Direction | Event Types |
 |-----------------------|-----------|-------------|
-| `orderchop.orders`    | Incoming  | `order.completed`, `order.cancelled`, `order.status_changed` |
-| `orderchop.payments`  | Incoming  | `payment.completed`, `payment.failed` |
+| `orderchop.orders`    | Incoming  | `order.completed`, `order.status_changed` |
+| `orderchop.payments`  | Incoming  | `payment.failed` |
 | `orderchop.customers` | Incoming  | `customer.created`, `customer.updated` |
 | `orderchop.carts`     | Incoming  | `cart.abandoned` |
-| `crm.flow.execute`    | Internal  | `flow.step.execute`, `flow.enrollment.start` |
+| `crm.flow.execute`    | Internal  | `flow.step.ready` |
 | `crm.flow.timer`      | Internal  | `flow.timer.fire` |
-| `crm.contacts`        | Internal  | `contact.tag_applied`, `contact.field_changed` |
 | `crm.notifications`   | Outgoing  | `notification.email`, `notification.sms` |
 
 ### Producing Test Events
@@ -608,19 +607,23 @@ This tests the complete automation chain: an external event triggers a flow, the
    { "name": "test-tag", "color": "#EF4444" }
    ```
 
-3. **Create a simple flow** (order completed → apply tag → stop):
+3. **Create a simple flow** (order completed → send_email):
    ```
    POST /api/v1/flows
    {
      "name": "Test Pipeline Flow",
      "nodes": [
-       { "id": "t1", "type": "trigger", "subType": "order_completed", "label": "Order", "config": {}, "position": {"x":0,"y":0} },
-       { "id": "a1", "type": "action", "subType": "apply_tag", "label": "Tag", "config": { "tagId": "YOUR_TAG_ID" }, "position": {"x":0,"y":150} },
-       { "id": "s1", "type": "logic", "subType": "stop", "label": "End", "config": {}, "position": {"x":0,"y":300} }
+       { "id": "t1", "type": "trigger", "subType": "order_completed", "label": "Order Completed", "config": {}, "position": {"x":0,"y":0} },
+       { "id": "a1", "type": "action", "subType": "send_email", "label": "Thank You Email",
+         "config": {
+           "recipients": [{"type": "customer"}],
+           "subject": "Thanks, {{customer.first_name}}!",
+           "body": "Hi {{customer.first_name}}, thanks for your order."
+         },
+         "position": {"x":0,"y":150} }
      ],
      "edges": [
-       { "id": "e1", "sourceNodeId": "t1", "targetNodeId": "a1" },
-       { "id": "e2", "sourceNodeId": "a1", "targetNodeId": "s1" }
+       { "id": "e1", "sourceNodeId": "t1", "targetNodeId": "a1" }
      ]
    }
    ```
@@ -854,6 +857,57 @@ db.crm_flows.find({ restaurantId: ObjectId("..."), status: "active" }).pretty()
 // Check tags
 db.crm_tags.find({ restaurantId: ObjectId("...") }).pretty()
 ```
+
+### Testing no_order_in_x_days Cron
+
+The `InactivityChecker` runs daily at 08:00 server time (`0 8 * * *`). To test it manually:
+
+```bash
+# Trigger the inactivity checker directly (ENABLE_SCHEDULERS=true required)
+# In development, temporarily lower the cron schedule to test immediately.
+# Or: insert a contact with lastOrderAt = 31+ days ago, then call the checker:
+
+mongosh orderchop --eval "
+  db.crm_contacts.insertOne({
+    restaurantId: ObjectId('YOUR_RESTAURANT_ID'),
+    customerId: ObjectId('SOME_CUSTOMER_ID'),
+    lastOrderAt: new Date(Date.now() - 35 * 24 * 60 * 60 * 1000),
+    totalOrders: 3,
+    lifecycleStatus: 'returning',
+  })
+"
+```
+
+Then restart with `ENABLE_SCHEDULERS=true` and watch for:
+```
+[InactivityChecker] Found N inactive contacts for flow "no-order-30-days"
+[TriggerService] Enrolling contact ... into flow ...
+```
+
+### Graph Validation Examples
+
+Test the 9 validation rules via the REST API:
+
+**R-1: Exactly one trigger node required**
+```bash
+curl -X PUT http://localhost:3001/api/v1/flows/FLOW_ID \
+  -H "Authorization: Bearer TOKEN" -H "X-Restaurant-Id: REST_ID" \
+  -H "Content-Type: application/json" \
+  -d '{"nodes":[{"id":"n1","type":"trigger","subType":"order_completed"},{"id":"n2","type":"trigger","subType":"first_order"}],"edges":[]}'
+# → 422 { "error": "INVALID_GRAPH", "rule": "R-1", "message": "Exactly one trigger node required..." }
+```
+
+**R-4: Action nodes must be terminal (no outgoing edges)**
+```bash
+curl -X PUT http://localhost:3001/api/v1/flows/FLOW_ID \
+  -H "Authorization: Bearer TOKEN" -H "X-Restaurant-Id: REST_ID" \
+  -H "Content-Type: application/json" \
+  -d '{"nodes":[{"id":"t1","type":"trigger","subType":"order_completed"},{"id":"a1","type":"action","subType":"send_email"},{"id":"a2","type":"action","subType":"send_sms"}],"edges":[{"id":"e1","sourceNodeId":"t1","targetNodeId":"a1"},{"id":"e2","sourceNodeId":"a1","targetNodeId":"a2"}]}'
+# → 422 { "error": "INVALID_GRAPH", "rule": "R-4" }
+```
+
+**R-5: No cycles allowed**
+A flow where node A → node B → node A would return 422 R-5.
 
 ### Running Unit Tests
 
