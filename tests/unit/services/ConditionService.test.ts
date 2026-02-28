@@ -1,8 +1,11 @@
 /**
- * @fileoverview Unit tests for ConditionService.
+ * @fileoverview Unit tests for ConditionService (trigger-bound yes/no semantics).
+ *
+ * US-011: ConditionService now uses 4-param evaluate(conditionNode, triggerNode, contact, eventContext).
+ * All filter logic reads from triggerNode.config, not conditionNode.config.
  */
 
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 vi.mock('@/config/logger.js', () => ({
   createLogger: () => ({
@@ -17,8 +20,12 @@ import { ConditionService } from '@/services/ConditionService.js';
 import type { IFlowNode } from '@/domain/models/crm/Flow.js';
 import type { IContactDocument } from '@/domain/models/crm/Contact.js';
 
-function makeNode(subType: string, config: Record<string, unknown>): IFlowNode {
-  return { id: 'node-1', type: 'condition', subType, config } as IFlowNode;
+function makeTriggerNode(subType: string, config: Record<string, unknown> = {}): IFlowNode {
+  return { id: 'trigger-1', type: 'trigger', subType, config } as IFlowNode;
+}
+
+function makeConditionNode(): IFlowNode {
+  return { id: 'cond-1', type: 'condition', subType: 'yes_no', config: {} } as IFlowNode;
 }
 
 function makeContact(overrides: Partial<IContactDocument> = {}): IContactDocument {
@@ -26,6 +33,7 @@ function makeContact(overrides: Partial<IContactDocument> = {}): IContactDocumen
     totalOrders: 0,
     lifetimeValue: 0,
     lifecycleStatus: 'lead',
+    lastOrderAt: null,
     tags: [],
     customFields: {},
     emailOptIn: true,
@@ -41,161 +49,140 @@ describe('ConditionService', () => {
     service = new ConditionService();
   });
 
-  describe('evaluate — yes_no', () => {
-    it('PRD test: contact { totalOrders: 5 } + greater_than 3 → yes', () => {
-      const node = makeNode('yes_no', {
-        conditions: [{ field: 'totalOrders', operator: 'greater_than', value: 3 }],
-        operator: 'AND',
-      });
-      const contact = makeContact({ totalOrders: 5 });
-      const result = service.evaluate(node, contact, {});
+  describe('evaluate — order_completed trigger', () => {
+    it('no minOrderTotal config → always yes', () => {
+      const trigger = makeTriggerNode('order_completed', {});
+      const result = service.evaluate(makeConditionNode(), trigger, makeContact(), {});
       expect(result.handle).toBe('yes');
     });
 
-    it('PRD test: contact { emailOptIn: false } + equals true → no', () => {
-      const node = makeNode('yes_no', {
-        conditions: [{ field: 'emailOptIn', operator: 'equals', value: true }],
-        operator: 'AND',
-      });
-      const contact = makeContact({ emailOptIn: false });
-      const result = service.evaluate(node, contact, {});
+    it('minOrderTotal: 50 + order.total=100 → yes', () => {
+      const trigger = makeTriggerNode('order_completed', { minOrderTotal: 50 });
+      const result = service.evaluate(makeConditionNode(), trigger, makeContact(), { order: { total: 100 } });
+      expect(result.handle).toBe('yes');
+    });
+
+    it('minOrderTotal: 50 + order.total=25 → no', () => {
+      const trigger = makeTriggerNode('order_completed', { minOrderTotal: 50 });
+      const result = service.evaluate(makeConditionNode(), trigger, makeContact(), { order: { total: 25 } });
       expect(result.handle).toBe('no');
     });
 
-    it('greater_than — contact value equals threshold → no', () => {
-      const node = makeNode('yes_no', {
-        conditions: [{ field: 'totalOrders', operator: 'greater_than', value: 5 }],
-        operator: 'AND',
-      });
-      const result = service.evaluate(node, makeContact({ totalOrders: 5 }), {});
-      expect(result.handle).toBe('no');
-    });
-
-    it('less_than — lifetimeValue', () => {
-      const node = makeNode('yes_no', {
-        conditions: [{ field: 'lifetimeValue', operator: 'less_than', value: 100 }],
-        operator: 'AND',
-      });
-      expect(service.evaluate(node, makeContact({ lifetimeValue: 50 }), {}).handle).toBe('yes');
-      expect(service.evaluate(node, makeContact({ lifetimeValue: 150 }), {}).handle).toBe('no');
-    });
-
-    it('equals — lifecycleStatus', () => {
-      const node = makeNode('yes_no', {
-        conditions: [{ field: 'lifecycleStatus', operator: 'equals', value: 'VIP' }],
-        operator: 'AND',
-      });
-      expect(service.evaluate(node, makeContact({ lifecycleStatus: 'VIP' }), {}).handle).toBe('yes');
-      expect(service.evaluate(node, makeContact({ lifecycleStatus: 'lead' }), {}).handle).toBe('no');
-    });
-
-    it('not_equals operator', () => {
-      const node = makeNode('yes_no', {
-        conditions: [{ field: 'lifecycleStatus', operator: 'not_equals', value: 'lead' }],
-        operator: 'AND',
-      });
-      expect(service.evaluate(node, makeContact({ lifecycleStatus: 'VIP' }), {}).handle).toBe('yes');
-      expect(service.evaluate(node, makeContact({ lifecycleStatus: 'lead' }), {}).handle).toBe('no');
-    });
-
-    it('contains — string field', () => {
-      const node = makeNode('yes_no', {
-        conditions: [{ field: 'email', operator: 'contains', value: '@example' }],
-        operator: 'AND',
-      });
-      const contact = makeContact({ email: 'user@example.com' } as any);
-      expect(service.evaluate(node, contact, {}).handle).toBe('yes');
-    });
-
-    it('not_contains — string field', () => {
-      const node = makeNode('yes_no', {
-        conditions: [{ field: 'email', operator: 'not_contains', value: '@spam' }],
-        operator: 'AND',
-      });
-      const contact = makeContact({ email: 'user@example.com' } as any);
-      expect(service.evaluate(node, contact, {}).handle).toBe('yes');
-    });
-
-    it('exists / not_exists operators', () => {
-      const existsNode = makeNode('yes_no', {
-        conditions: [{ field: 'customFields.referral', operator: 'exists', value: null }],
-        operator: 'AND',
-      });
-      const notExistsNode = makeNode('yes_no', {
-        conditions: [{ field: 'customFields.referral', operator: 'not_exists', value: null }],
-        operator: 'AND',
-      });
-
-      const withField = makeContact({ customFields: { referral: 'google' } });
-      const withoutField = makeContact({ customFields: {} });
-
-      expect(service.evaluate(existsNode, withField, {}).handle).toBe('yes');
-      expect(service.evaluate(existsNode, withoutField, {}).handle).toBe('no');
-      expect(service.evaluate(notExistsNode, withoutField, {}).handle).toBe('yes');
-      expect(service.evaluate(notExistsNode, withField, {}).handle).toBe('no');
-    });
-
-    it('customFields.<key> dot-notation field resolution', () => {
-      const node = makeNode('yes_no', {
-        conditions: [{ field: 'customFields.vipTier', operator: 'equals', value: 'gold' }],
-        operator: 'AND',
-      });
-      const contact = makeContact({ customFields: { vipTier: 'gold' } });
-      expect(service.evaluate(node, contact, {}).handle).toBe('yes');
-    });
-
-    it('AND operator — all conditions must pass', () => {
-      const node = makeNode('yes_no', {
-        conditions: [
-          { field: 'totalOrders', operator: 'greater_than', value: 3 },
-          { field: 'emailOptIn', operator: 'equals', value: true },
-        ],
-        operator: 'AND',
-      });
-      expect(service.evaluate(node, makeContact({ totalOrders: 5, emailOptIn: true }), {}).handle).toBe('yes');
-      expect(service.evaluate(node, makeContact({ totalOrders: 5, emailOptIn: false }), {}).handle).toBe('no');
-    });
-
-    it('OR operator — any condition passing is sufficient', () => {
-      const node = makeNode('yes_no', {
-        conditions: [
-          { field: 'totalOrders', operator: 'greater_than', value: 100 },
-          { field: 'emailOptIn', operator: 'equals', value: true },
-        ],
-        operator: 'OR',
-      });
-      expect(service.evaluate(node, makeContact({ totalOrders: 1, emailOptIn: true }), {}).handle).toBe('yes');
-      expect(service.evaluate(node, makeContact({ totalOrders: 1, emailOptIn: false }), {}).handle).toBe('no');
+    it('minOrderTotal: 50 + order.total=50 (exactly) → yes', () => {
+      const trigger = makeTriggerNode('order_completed', { minOrderTotal: 50 });
+      const result = service.evaluate(makeConditionNode(), trigger, makeContact(), { order: { total: 50 } });
+      expect(result.handle).toBe('yes');
     });
   });
 
-  describe('evaluate — unsupported subtypes', () => {
-    it('ab_split → yes with not implemented reason', () => {
-      const node = makeNode('ab_split', {});
-      const result = service.evaluate(node, makeContact(), {});
+  describe('evaluate — first_order trigger', () => {
+    it('no minOrderTotal config → always yes', () => {
+      const trigger = makeTriggerNode('first_order', {});
+      const result = service.evaluate(makeConditionNode(), trigger, makeContact(), {});
       expect(result.handle).toBe('yes');
-      expect(result.reason).toContain('not implemented');
     });
 
-    it('multi_branch → yes with not implemented reason', () => {
-      const node = makeNode('multi_branch', {});
-      const result = service.evaluate(node, makeContact(), {});
+    it('minOrderTotal: 20 + order.total=30 → yes', () => {
+      const trigger = makeTriggerNode('first_order', { minOrderTotal: 20 });
+      const result = service.evaluate(makeConditionNode(), trigger, makeContact(), { order: { total: 30 } });
       expect(result.handle).toBe('yes');
-      expect(result.reason).toContain('not implemented');
+    });
+  });
+
+  describe('evaluate — nth_order trigger', () => {
+    it('n=5 + contact.totalOrders=5 → yes', () => {
+      const trigger = makeTriggerNode('nth_order', { n: 5 });
+      const result = service.evaluate(makeConditionNode(), trigger, makeContact({ totalOrders: 5 }), {});
+      expect(result.handle).toBe('yes');
     });
 
-    it('random_distribution → yes with not implemented reason', () => {
-      const node = makeNode('random_distribution', {});
-      const result = service.evaluate(node, makeContact(), {});
-      expect(result.handle).toBe('yes');
-      expect(result.reason).toContain('not implemented');
+    it('n=5 + contact.totalOrders=3 → no', () => {
+      const trigger = makeTriggerNode('nth_order', { n: 5 });
+      const result = service.evaluate(makeConditionNode(), trigger, makeContact({ totalOrders: 3 }), {});
+      expect(result.handle).toBe('no');
     });
 
-    it('unknown subtype → yes with not implemented reason', () => {
-      const node = makeNode('unknown_type', {});
-      const result = service.evaluate(node, makeContact(), {});
+    it('no n config → always yes', () => {
+      const trigger = makeTriggerNode('nth_order', {});
+      const result = service.evaluate(makeConditionNode(), trigger, makeContact(), {});
       expect(result.handle).toBe('yes');
-      expect(result.reason).toContain('not implemented');
+    });
+  });
+
+  describe('evaluate — order_status_changed trigger', () => {
+    it('targetStatus=delivered + order.status=delivered → yes', () => {
+      const trigger = makeTriggerNode('order_status_changed', { targetStatus: 'delivered' });
+      const result = service.evaluate(makeConditionNode(), trigger, makeContact(), { order: { status: 'delivered' } });
+      expect(result.handle).toBe('yes');
+    });
+
+    it('targetStatus=delivered + order.status=pending → no', () => {
+      const trigger = makeTriggerNode('order_status_changed', { targetStatus: 'delivered' });
+      const result = service.evaluate(makeConditionNode(), trigger, makeContact(), { order: { status: 'pending' } });
+      expect(result.handle).toBe('no');
+    });
+
+    it('no targetStatus config → always yes', () => {
+      const trigger = makeTriggerNode('order_status_changed', {});
+      const result = service.evaluate(makeConditionNode(), trigger, makeContact(), {});
+      expect(result.handle).toBe('yes');
+    });
+  });
+
+  describe('evaluate — no_order_in_x_days trigger', () => {
+    it('x=30 + contact.lastOrderAt=60 days ago → yes', () => {
+      const trigger = makeTriggerNode('no_order_in_x_days', { x: 30 });
+      const sixtyDaysAgo = new Date(Date.now() - 60 * 24 * 3600 * 1000);
+      const result = service.evaluate(makeConditionNode(), trigger, makeContact({ lastOrderAt: sixtyDaysAgo }), {});
+      expect(result.handle).toBe('yes');
+    });
+
+    it('x=30 + contact.lastOrderAt=10 days ago → no', () => {
+      const trigger = makeTriggerNode('no_order_in_x_days', { x: 30 });
+      const tenDaysAgo = new Date(Date.now() - 10 * 24 * 3600 * 1000);
+      const result = service.evaluate(makeConditionNode(), trigger, makeContact({ lastOrderAt: tenDaysAgo }), {});
+      expect(result.handle).toBe('no');
+    });
+
+    it('x=30 + contact.lastOrderAt=null (no orders) → yes (Infinity >= x)', () => {
+      const trigger = makeTriggerNode('no_order_in_x_days', { x: 30 });
+      const result = service.evaluate(makeConditionNode(), trigger, makeContact({ lastOrderAt: null }), {});
+      expect(result.handle).toBe('yes');
+    });
+
+    it('no x config → always yes', () => {
+      const trigger = makeTriggerNode('no_order_in_x_days', {});
+      const result = service.evaluate(makeConditionNode(), trigger, makeContact(), {});
+      expect(result.handle).toBe('yes');
+    });
+  });
+
+  describe('evaluate — triggers with no filter config (always yes)', () => {
+    it('payment_failed → always yes', () => {
+      const trigger = makeTriggerNode('payment_failed', {});
+      const result = service.evaluate(makeConditionNode(), trigger, makeContact(), {});
+      expect(result.handle).toBe('yes');
+    });
+
+    it('abandoned_cart → always yes', () => {
+      const trigger = makeTriggerNode('abandoned_cart', {});
+      const result = service.evaluate(makeConditionNode(), trigger, makeContact(), {});
+      expect(result.handle).toBe('yes');
+    });
+
+    it('unknown trigger subtype → always yes', () => {
+      const trigger = makeTriggerNode('some_unknown_trigger', {});
+      const result = service.evaluate(makeConditionNode(), trigger, makeContact(), {});
+      expect(result.handle).toBe('yes');
+    });
+  });
+
+  describe('evaluate — result includes reason string', () => {
+    it('returns a non-empty reason string', () => {
+      const trigger = makeTriggerNode('order_completed', {});
+      const result = service.evaluate(makeConditionNode(), trigger, makeContact(), {});
+      expect(typeof result.reason).toBe('string');
+      expect(result.reason.length).toBeGreaterThan(0);
     });
   });
 });

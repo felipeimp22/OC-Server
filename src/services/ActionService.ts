@@ -115,7 +115,7 @@ export class ActionService {
       await this.communicationService.sendEmail({
         restaurantId,
         contactId: contact._id.toString(),
-        to: contact.email,
+        to: contact.email ? [contact.email] : [],
         templateId: node.config.templateId as string | undefined,
         subject: node.config.subject as string | undefined,
         body: node.config.body as string | undefined,
@@ -314,7 +314,7 @@ export class ActionService {
         await this.communicationService.sendEmail({
           restaurantId,
           contactId: 'system',
-          to,
+          to: to ? [to] : [],
           subject,
           body,
           context,

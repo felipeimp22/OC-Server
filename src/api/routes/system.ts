@@ -85,7 +85,7 @@ export async function systemRoutes(app: FastifyInstance): Promise<void> {
       const result = await commService.sendEmail({
         restaurantId: request.restaurantId,
         contactId: 'test-manual',
-        to,
+        to: [to],
         subject: subject ?? 'CRM Engine Test Email',
         body: body ?? '<h1>It works!</h1><p>This is a test email from oc-crm-engine.</p>',
         context: { first_name: 'Test', restaurant_name: 'OrderChop' },

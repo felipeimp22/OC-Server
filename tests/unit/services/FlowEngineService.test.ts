@@ -351,7 +351,7 @@ describe('FlowEngineService', () => {
 
       await service.processCurrentNode(EXEC_ID);
 
-      expect(mockConditionService.evaluate).toHaveBeenCalledWith(condNode, expect.anything(), expect.anything());
+      expect(mockConditionService.evaluate).toHaveBeenCalledWith(condNode, expect.anything(), expect.anything(), expect.anything());
       // Should advance to the 'yes' branch target node
       expect(mockExecutionRepo.advanceToNode).toHaveBeenCalledWith(EXEC_ID, 'n2');
     });
@@ -373,9 +373,8 @@ describe('FlowEngineService', () => {
 
       expect(mockTimerService.scheduleTimer).toHaveBeenCalledWith(
         timerNode,
-        expect.anything(), // contact
         EXEC_ID,
-        expect.any(String), // timezone
+        expect.any(String), // restaurantId
       );
       // execution must NOT advance — Kafka message is NOT produced and advanceToNode is NOT called
       expect(mockExecutionRepo.advanceToNode).not.toHaveBeenCalled();

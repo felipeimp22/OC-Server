@@ -137,7 +137,7 @@ describe('ActionService', () => {
         expect.objectContaining({
           restaurantId,
           contactId: 'contact-1',
-          to: 'john@example.com',
+          to: ['john@example.com'],
           executionId,
           flowId,
         }),
@@ -308,7 +308,7 @@ describe('ActionService', () => {
       expect(mockCommService.sendEmail).toHaveBeenCalledWith(
         expect.objectContaining({
           restaurantId,
-          to: 'admin@restaurant.com',
+          to: ['admin@restaurant.com'],
           subject: 'Alert',
           body: 'A contact just ordered!',
         }),

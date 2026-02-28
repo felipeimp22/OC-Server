@@ -104,7 +104,7 @@ describe('CommunicationService', () => {
       const result = await service.sendEmail({
         restaurantId: 'rest-1',
         contactId: 'contact-1',
-        to: 'john@example.com',
+        to: ['john@example.com'],
         subject: 'Hello {{first_name}}',
         body: '<p>Welcome, {{first_name}}!</p>',
         context: { first_name: 'John' },
@@ -114,7 +114,7 @@ describe('CommunicationService', () => {
       expect(mockCommLogRepo.create).toHaveBeenCalled();
       expect(mockEmailProvider.sendEmail).toHaveBeenCalledWith(
         expect.objectContaining({
-          to: 'john@example.com',
+          to: ['john@example.com'],
           from: 'noreply@restaurant.com',
           subject: 'Hello John',
           html: '<p>Welcome, John!</p>',
@@ -129,7 +129,7 @@ describe('CommunicationService', () => {
       await service.sendEmail({
         restaurantId: 'rest-1',
         contactId: 'contact-1',
-        to: 'john@example.com',
+        to: ['john@example.com'],
         subject: 'Hello',
         body: 'Body',
         context: {},
@@ -155,7 +155,7 @@ describe('CommunicationService', () => {
       await service.sendEmail({
         restaurantId: 'rest-1',
         contactId: 'contact-1',
-        to: 'john@example.com',
+        to: ['john@example.com'],
         templateId: 'tpl-1',
         context: { first_name: 'John' },
       });
@@ -175,7 +175,7 @@ describe('CommunicationService', () => {
       await service.sendEmail({
         restaurantId: 'rest-1',
         contactId: 'contact-1',
-        to: 'john@example.com',
+        to: ['john@example.com'],
         subject: 'Test',
         body: 'Test',
         context: {},

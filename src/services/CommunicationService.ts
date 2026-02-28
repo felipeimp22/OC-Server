@@ -28,7 +28,8 @@ const log = createLogger('CommunicationService');
 export interface SendEmailParams {
   restaurantId: string;
   contactId: string;
-  to: string;
+  /** Resolved recipient email addresses */
+  to: string[];
   templateId?: string;
   subject?: string;
   body?: string;
@@ -63,12 +64,43 @@ export class CommunicationService {
   }
 
   /**
-   * Send an email to a contact.
+   * Interpolate template variables in a string.
+   * Exported as a static method for use by WebhookService and other services.
    *
-   * @param params - Email parameters
+   * @param template - Template string with {{variable}} or {{object.field}} placeholders
+   * @param context - Interpolation context (flat or nested)
+   * @returns Interpolated string
+   */
+  static interpolate(template: string, context: InterpolationContext): string {
+    return interpolate(template, context);
+  }
+
+  /**
+   * Send an email to one or more recipients.
+   *
+   * @param params - Email parameters including resolved to[] addresses
    * @returns The communication log record
    */
   async sendEmail(params: SendEmailParams): Promise<ICommunicationLogDocument> {
+    // Validate recipients
+    const validTo = params.to.filter(Boolean);
+    if (validTo.length === 0) {
+      log.info({ contactId: params.contactId }, 'No email recipients — skipping send');
+      return this.commLogRepo.create({
+        restaurantId: params.restaurantId,
+        contactId: params.contactId,
+        channel: 'email',
+        templateId: params.templateId ?? null,
+        flowId: params.flowId ?? null,
+        executionId: params.executionId ?? null,
+        to: '',
+        subject: params.subject ?? '',
+        status: 'skipped',
+        reason: 'no_email',
+        sentAt: new Date(),
+      } as any);
+    }
+
     // Check email opt-in status
     const contact = await this.contactRepo.findById(params.restaurantId, params.contactId);
     if (contact && contact.emailOptIn === false) {
@@ -80,7 +112,7 @@ export class CommunicationService {
         templateId: params.templateId ?? null,
         flowId: params.flowId ?? null,
         executionId: params.executionId ?? null,
-        to: params.to,
+        to: validTo.join(', '),
         subject: params.subject ?? '',
         status: 'skipped',
         reason: 'opted_out',
@@ -100,9 +132,11 @@ export class CommunicationService {
       }
     }
 
-    // Interpolate variables
+    // Interpolate variables (supports {{customer.first_name}} dot-notation)
     subject = interpolate(subject, params.context);
     body = interpolate(body, params.context);
+
+    const toStr = validTo.join(', ');
 
     // Create communication log (queued)
     const commLog = await this.commLogRepo.create({
@@ -112,19 +146,19 @@ export class CommunicationService {
       templateId: params.templateId ?? null,
       flowId: params.flowId ?? null,
       executionId: params.executionId ?? null,
-      to: params.to,
+      to: toStr,
       subject,
       status: 'queued',
       sentAt: new Date(),
     } as any);
 
-    // Send via provider with retry
+    // Send via provider with retry (max 3 attempts)
     try {
       const provider = getEmailProvider();
       const result = await withRetry(
         () =>
           provider.sendEmail({
-            to: params.to,
+            to: validTo,
             from: env.EMAIL_FROM_ADDRESS ?? `noreply@${env.EMAIL_DOMAIN}`,
             subject,
             html: body,
@@ -142,10 +176,10 @@ export class CommunicationService {
           $set: { providerMessageId: result.messageId },
         });
       }
-      log.info({ to: params.to, messageId: result.messageId }, 'Email sent');
+      log.info({ to: toStr, messageId: result.messageId }, 'Email sent');
     } catch (err) {
       await this.commLogRepo.updateStatus(commLog._id, 'failed');
-      log.error({ err, to: params.to }, 'Email send failed after retries');
+      log.error({ err, to: toStr }, 'Email send failed after retries');
     }
 
     return commLog;
