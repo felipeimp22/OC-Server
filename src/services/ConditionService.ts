@@ -1,8 +1,8 @@
 /**
- * @fileoverview Condition Service — evaluates condition nodes in flows.
+ * @fileoverview Condition Service — evaluates yes/no condition nodes in flows.
  *
- * Handles yes_no condition evaluation with AND/OR operator joining.
- * Unsupported subtypes (ab_split, multi_branch, random_distribution) default to 'yes'.
+ * Trigger-bound semantics: the condition node carries no operator config.
+ * All filter logic reads from triggerNode.config based on the trigger's subType.
  *
  * @module services/ConditionService
  */
@@ -21,172 +21,88 @@ export interface ConditionResult {
   reason: string;
 }
 
-interface SingleCondition {
-  field: string;
-  operator: string;
-  value: unknown;
-}
-
 export class ConditionService {
   /**
-   * Evaluate a condition node against a contact and execution context.
+   * Evaluate a yes_no condition node against a contact and event context.
+   * All filter logic is read from triggerNode.config, not conditionNode.config.
    * Pure synchronous — no async operations.
    *
-   * @param node - The condition node to evaluate
+   * @param conditionNode - The condition node being evaluated
+   * @param triggerNode - The flow's trigger node (source of filter config)
    * @param contact - The CRM contact
-   * @param context - The execution context (runtime variables)
+   * @param eventContext - The execution context (runtime event variables)
    * @returns { handle: 'yes' | 'no', reason: string }
    */
   evaluate(
-    node: IFlowNode,
+    conditionNode: IFlowNode,
+    triggerNode: IFlowNode,
     contact: IContactDocument,
-    context: Record<string, unknown>,
+    eventContext: Record<string, unknown>,
   ): ConditionResult {
-    switch (node.subType) {
-      case 'yes_no':
-        return this.evaluateYesNo(node, contact, context);
+    const triggerConfig = (triggerNode.config ?? {}) as Record<string, unknown>;
+    const subType = triggerNode.subType;
 
-      case 'ab_split':
-      case 'multi_branch':
-      case 'random_distribution':
-        return { handle: 'yes', reason: 'not implemented — defaulting to yes' };
+    log.debug({ subType, conditionNodeId: conditionNode.id }, 'Evaluating condition');
+
+    switch (subType) {
+      case 'order_completed':
+      case 'first_order': {
+        const minOrderTotal = triggerConfig.minOrderTotal as number | undefined;
+        if (minOrderTotal !== undefined) {
+          const order = eventContext.order as Record<string, unknown> | undefined;
+          const orderTotal = (order?.total as number) ?? 0;
+          const passes = orderTotal >= minOrderTotal;
+          return {
+            handle: passes ? 'yes' : 'no',
+            reason: `${subType}: order.total(${orderTotal}) >= minOrderTotal(${minOrderTotal}) → ${passes}`,
+          };
+        }
+        return { handle: 'yes', reason: `${subType}: no filter config — always yes` };
+      }
+
+      case 'nth_order': {
+        const n = triggerConfig.n as number | undefined;
+        if (n !== undefined) {
+          const passes = contact.totalOrders === n;
+          return {
+            handle: passes ? 'yes' : 'no',
+            reason: `nth_order: totalOrders(${contact.totalOrders}) === n(${n}) → ${passes}`,
+          };
+        }
+        return { handle: 'yes', reason: 'nth_order: no n configured — always yes' };
+      }
+
+      case 'order_status_changed': {
+        const targetStatus = triggerConfig.targetStatus as string | undefined;
+        if (targetStatus !== undefined) {
+          const order = eventContext.order as Record<string, unknown> | undefined;
+          const currentStatus = order?.status as string | undefined;
+          const passes = currentStatus === targetStatus;
+          return {
+            handle: passes ? 'yes' : 'no',
+            reason: `order_status_changed: status(${currentStatus}) === targetStatus(${targetStatus}) → ${passes}`,
+          };
+        }
+        return { handle: 'yes', reason: 'order_status_changed: no targetStatus configured — always yes' };
+      }
+
+      case 'no_order_in_x_days': {
+        const x = triggerConfig.x as number | undefined;
+        if (x !== undefined) {
+          const daysSinceOrder = contact.lastOrderAt
+            ? Math.floor((Date.now() - contact.lastOrderAt.getTime()) / (1000 * 60 * 60 * 24))
+            : Infinity;
+          const passes = daysSinceOrder >= x;
+          return {
+            handle: passes ? 'yes' : 'no',
+            reason: `no_order_in_x_days: daysSinceOrder(${daysSinceOrder}) >= x(${x}) → ${passes}`,
+          };
+        }
+        return { handle: 'yes', reason: 'no_order_in_x_days: no x configured — always yes' };
+      }
 
       default:
-        log.warn({ subType: node.subType }, 'Unknown condition subType — defaulting to yes');
-        return { handle: 'yes', reason: 'not implemented — defaulting to yes' };
-    }
-  }
-
-  /**
-   * Evaluate a yes/no condition node.
-   *
-   * Config supports two formats:
-   * - Array: { conditions: [{ field, operator, value }], operator: 'AND' | 'OR' }
-   * - Single (legacy): { field, operator, value }
-   *
-   * Supported operators: equals, not_equals, greater_than, less_than,
-   *                      contains, not_contains, exists, not_exists
-   */
-  private evaluateYesNo(
-    node: IFlowNode,
-    contact: IContactDocument,
-    context: Record<string, unknown>,
-  ): ConditionResult {
-    const config = node.config as Record<string, unknown>;
-
-    let conditions: SingleCondition[];
-    let joinOperator: 'AND' | 'OR' = 'AND';
-
-    if (Array.isArray(config.conditions) && config.conditions.length > 0) {
-      conditions = config.conditions as SingleCondition[];
-      joinOperator = (config.operator as 'AND' | 'OR') ?? 'AND';
-    } else if (config.field) {
-      // Legacy single-condition format
-      conditions = [
-        {
-          field: config.field as string,
-          operator: config.operator as string,
-          value: config.value,
-        },
-      ];
-    } else {
-      return { handle: 'yes', reason: 'No conditions configured' };
-    }
-
-    const results = conditions.map((cond) => {
-      const actual = this.resolveField(cond.field, contact, context);
-      const passed = this.compare(actual, cond.operator, cond.value);
-      log.debug(
-        { field: cond.field, operator: cond.operator, expected: cond.value, actual, passed },
-        'Condition evaluated',
-      );
-      return passed;
-    });
-
-    const overall =
-      joinOperator === 'OR' ? results.some(Boolean) : results.every(Boolean);
-
-    const handle: 'yes' | 'no' = overall ? 'yes' : 'no';
-    const reason = `${joinOperator}(${conditions.map((c) => `${c.field} ${c.operator} ${JSON.stringify(c.value)}`).join(', ')}) → ${handle}`;
-
-    return { handle, reason };
-  }
-
-  /**
-   * Resolve a field value from the contact or execution context.
-   *
-   * Supported fields: totalOrders, lifetimeValue, lifecycleStatus, tags,
-   *   customFields.<key>, emailOptIn, smsOptIn, or any direct contact property.
-   */
-  private resolveField(
-    field: string,
-    contact: IContactDocument,
-    context: Record<string, unknown>,
-  ): unknown {
-    // Handle customFields.<key> dot notation
-    if (field.startsWith('customFields.')) {
-      const key = field.slice('customFields.'.length);
-      return contact.customFields?.[key];
-    }
-
-    // Direct contact properties
-    const contactObj = (contact.toObject ? contact.toObject() : contact) as Record<string, unknown>;
-    if (field in contactObj) {
-      return contactObj[field];
-    }
-
-    // Execution context fallback
-    if (field in context) {
-      return context[field];
-    }
-
-    return undefined;
-  }
-
-  /**
-   * Compare two values using the given operator.
-   *
-   * Supported: equals, not_equals, greater_than, less_than,
-   *            contains, not_contains, exists, not_exists
-   */
-  private compare(actual: unknown, operator: string, expected: unknown): boolean {
-    switch (operator) {
-      case 'equals':
-        // eslint-disable-next-line eqeqeq
-        return actual == expected;
-
-      case 'not_equals':
-        // eslint-disable-next-line eqeqeq
-        return actual != expected;
-
-      case 'greater_than':
-        return Number(actual) > Number(expected);
-
-      case 'less_than':
-        return Number(actual) < Number(expected);
-
-      case 'contains':
-        if (Array.isArray(actual)) {
-          // For tags (ObjectId array) — compare as strings
-          return actual.some((item) => String(item) === String(expected));
-        }
-        return typeof actual === 'string' && actual.includes(String(expected));
-
-      case 'not_contains':
-        if (Array.isArray(actual)) {
-          return !actual.some((item) => String(item) === String(expected));
-        }
-        return typeof actual === 'string' && !actual.includes(String(expected));
-
-      case 'exists':
-        return actual !== undefined && actual !== null;
-
-      case 'not_exists':
-        return actual === undefined || actual === null;
-
-      default:
-        log.warn({ operator }, 'Unknown comparison operator — returning false');
-        return false;
+        return { handle: 'yes', reason: `${subType}: no filter config — always yes` };
     }
   }
 }

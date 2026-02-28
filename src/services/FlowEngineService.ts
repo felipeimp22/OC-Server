@@ -216,8 +216,9 @@ export class FlowEngineService {
       }
 
       case 'condition': {
+        const triggerNode = flow.nodes.find((n) => n.type === 'trigger') ?? node;
         const conditionResult: ConditionResult = this.conditionService.evaluate(
-          node, contact, context,
+          node, triggerNode, contact, context,
         );
         await this.logNodeExecution(
           execution, node, 'success',
@@ -301,7 +302,8 @@ export class FlowEngineService {
       }
 
       case 'until_condition': {
-        const condResult = this.conditionService.evaluate(node, contact, context);
+        const untilTriggerNode = flow.nodes.find((n) => n.type === 'trigger') ?? node;
+        const condResult = this.conditionService.evaluate(node, untilTriggerNode, contact, context);
         if (condResult.handle === 'yes') {
           await this.logNodeExecution(execution, node, 'success', 'Until condition met — advancing');
           await this.advanceToNext(execution, flow, node, 'met');
