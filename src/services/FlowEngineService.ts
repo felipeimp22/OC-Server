@@ -230,11 +230,8 @@ export class FlowEngineService {
       }
 
       case 'timer': {
-        // Get restaurant timezone
-        const timezone = (context._timezone as string) ?? 'UTC';
-
         const timerResult = await this.timerService.scheduleTimer(
-          node, contact, executionId, timezone,
+          node, executionId, restaurantId,
         );
 
         if (timerResult) {
