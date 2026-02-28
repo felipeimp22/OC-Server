@@ -160,6 +160,14 @@ export class FlowExecutionRepository extends BaseRepository<IFlowExecutionDocume
   }
 
   /**
+   * Load a flow execution by ID without restaurantId tenancy check.
+   * Used internally by FlowTimerProcessor where restaurantId is not known upfront.
+   */
+  async findByExecutionId(id: Types.ObjectId | string): Promise<IFlowExecutionDocument | null> {
+    return this.model.findById(id).exec();
+  }
+
+  /**
    * Count active executions per flow (for flow stats).
    */
   async countActiveByFlow(
