@@ -1,28 +1,22 @@
 /**
  * @fileoverview Action Service — executes action nodes in flows.
  *
- * Handles all action types:
- * - send_email, send_sms
- * - apply_tag, remove_tag
- * - update_field
- * - add_note
- * - create_task, assign_owner
- * - outgoing_webhook
- * - meta_capi
- * - admin_notification
+ * Handles 3 action types: send_email, send_sms, outgoing_webhook.
  *
  * @module services/ActionService
  */
 
-import axios from 'axios';
 import type { IFlowNode } from '../domain/models/crm/Flow.js';
 import type { IContactDocument } from '../domain/models/crm/Contact.js';
+import { Restaurant } from '../domain/models/external/Restaurant.js';
+import { User } from '../domain/models/external/User.js';
 import { CommunicationService } from './CommunicationService.js';
-import { ContactService } from './ContactService.js';
-import { TaskRepository } from '../repositories/TaskRepository.js';
-import { getMetaProvider } from '../factories/MetaProviderFactory.js';
 import { buildContext, type InterpolationContext } from '../utils/variableInterpolator.js';
 import { withRetry } from '../utils/retryHelper.js';
+import axios from 'axios';
+import { createLogger } from '../config/logger.js';
+
+const log = createLogger('ActionService');
 
 /** Result of executing an action */
 export interface ActionResult {
@@ -32,15 +26,24 @@ export interface ActionResult {
   metadata?: Record<string, unknown>;
 }
 
+/** Recipient descriptor in send_email config */
+type EmailRecipient =
+  | { type: 'customer' }
+  | { type: 'restaurant' }
+  | { type: 'staff'; userId: string }
+  | { type: 'custom'; email: string };
+
+/** Recipient descriptor in send_sms config */
+type SMSRecipient =
+  | { type: 'customer' }
+  | { type: 'restaurant' }
+  | { type: 'custom'; phone: string };
+
 export class ActionService {
   private readonly communicationService: CommunicationService;
-  private readonly contactService: ContactService;
-  private readonly taskRepo: TaskRepository;
 
   constructor() {
     this.communicationService = new CommunicationService();
-    this.contactService = new ContactService();
-    this.taskRepo = new TaskRepository();
   }
 
   /**
@@ -52,7 +55,7 @@ export class ActionService {
    * @param executionContext - Flow execution context
    * @param executionId - Flow execution ID (for linking comm logs)
    * @param flowId - Flow ID
-   * @returns Action result
+   * @returns Action result — never throws
    */
   async execute(
     node: IFlowNode,
@@ -77,26 +80,11 @@ export class ActionService {
           return await this.executeSendEmail(node, contact, restaurantId, context, executionId, flowId);
         case 'send_sms':
           return await this.executeSendSMS(node, contact, restaurantId, context, executionId, flowId);
-        case 'apply_tag':
-          return await this.executeApplyTag(node, contact, restaurantId);
-        case 'remove_tag':
-          return await this.executeRemoveTag(node, contact, restaurantId);
-        case 'update_field':
-          return await this.executeUpdateField(node, contact, restaurantId);
-        case 'add_note':
-          return await this.executeAddNote();
-        case 'create_task':
-          return await this.executeCreateTask(node, contact, restaurantId, executionId);
-        case 'assign_owner':
-          return await this.executeAssignOwner();
         case 'outgoing_webhook':
-          return await this.executeWebhook(node, executionContext);
-        case 'meta_capi':
-          return await this.executeMetaCAPI(node, contact, executionContext);
-        case 'admin_notification':
-          return await this.executeAdminNotification(node, restaurantId, context, executionId, flowId);
+          return await this.executeWebhook(node, context);
         default:
-          return { success: false, action: node.subType, error: `Unknown action type: ${node.subType}` };
+          log.error({ subType: node.subType }, 'Unsupported action type');
+          return { success: false, action: node.subType, error: 'action_not_supported' };
       }
     } catch (err) {
       return { success: false, action: node.subType, error: (err as Error).message };
@@ -112,11 +100,27 @@ export class ActionService {
     flowId: string,
   ): Promise<ActionResult> {
     try {
+      const recipients = (node.config.recipients ?? []) as EmailRecipient[];
+      const resolvedEmails: string[] = [];
+
+      for (const recipient of recipients) {
+        if (recipient.type === 'customer') {
+          if (contact.email) resolvedEmails.push(contact.email);
+        } else if (recipient.type === 'restaurant') {
+          const restaurant = await Restaurant.findById(restaurantId).lean();
+          if (restaurant?.email) resolvedEmails.push(restaurant.email);
+        } else if (recipient.type === 'staff') {
+          const user = await User.findById(recipient.userId).lean();
+          if (user?.email) resolvedEmails.push(user.email);
+        } else if (recipient.type === 'custom') {
+          if (recipient.email) resolvedEmails.push(recipient.email);
+        }
+      }
+
       await this.communicationService.sendEmail({
         restaurantId,
         contactId: contact._id.toString(),
-        to: contact.email ? [contact.email] : [],
-        templateId: node.config.templateId as string | undefined,
+        to: resolvedEmails,
         subject: node.config.subject as string | undefined,
         body: node.config.body as string | undefined,
         context,
@@ -137,15 +141,29 @@ export class ActionService {
     executionId: string,
     flowId: string,
   ): Promise<ActionResult> {
-    if (!contact.phone) {
+    const recipient = node.config.recipient as SMSRecipient | undefined;
+    let to: string | null = null;
+
+    if (!recipient || recipient.type === 'customer') {
+      if (!contact.phone) {
+        return { success: true, action: 'send_sms', metadata: { skipped: true, reason: 'no_phone' } };
+      }
+      to = `${contact.phone.countryCode}${contact.phone.number}`;
+    } else if (recipient.type === 'restaurant') {
+      const restaurant = await Restaurant.findById(restaurantId).lean();
+      to = restaurant?.phone ?? null;
+    } else if (recipient.type === 'custom') {
+      to = recipient.phone;
+    }
+
+    if (!to) {
       return { success: true, action: 'send_sms', metadata: { skipped: true, reason: 'no_phone' } };
     }
-    const phoneNum = `${contact.phone.countryCode}${contact.phone.number}`;
+
     await this.communicationService.sendSMS({
       restaurantId,
       contactId: contact._id.toString(),
-      to: phoneNum,
-      templateId: node.config.templateId as string | undefined,
+      to,
       body: node.config.body as string | undefined,
       context,
       flowId,
@@ -154,177 +172,31 @@ export class ActionService {
     return { success: true, action: 'send_sms' };
   }
 
-  private async executeApplyTag(
-    node: IFlowNode,
-    contact: IContactDocument,
-    restaurantId: string,
-  ): Promise<ActionResult> {
-    const tagId = node.config.tagId as string;
-    if (!tagId) return { success: false, action: 'apply_tag', error: 'No tagId in config' };
-
-    await this.contactService.applyTag(restaurantId, contact._id.toString(), tagId);
-    return { success: true, action: 'apply_tag', metadata: { tagId } };
-  }
-
-  private async executeRemoveTag(
-    node: IFlowNode,
-    contact: IContactDocument,
-    restaurantId: string,
-  ): Promise<ActionResult> {
-    const tagId = node.config.tagId as string;
-    if (!tagId) return { success: false, action: 'remove_tag', error: 'No tagId in config' };
-
-    await this.contactService.removeTag(restaurantId, contact._id.toString(), tagId);
-    return { success: true, action: 'remove_tag', metadata: { tagId } };
-  }
-
-  private async executeUpdateField(
-    node: IFlowNode,
-    contact: IContactDocument,
-    restaurantId: string,
-  ): Promise<ActionResult> {
-    const { key, value } = node.config as { key: string; value: unknown };
-    if (!key) return { success: false, action: 'update_field', error: 'No key in config' };
-
-    await this.contactService.update(restaurantId, contact._id.toString(), {
-      [`customFields.${key}`]: value,
-    } as Partial<IContactDocument>);
-
-    return { success: true, action: 'update_field', metadata: { key, value } };
-  }
-
-  private async executeAddNote(): Promise<ActionResult> {
-    return { success: true, action: 'add_note' };
-  }
-
-  private async executeCreateTask(
-    node: IFlowNode,
-    contact: IContactDocument,
-    restaurantId: string,
-    executionId: string,
-  ): Promise<ActionResult> {
-    const { title, description, priority, assignedTo, dueInDays } = node.config as {
-      title?: string;
-      description?: string;
-      priority?: string;
-      assignedTo?: string;
-      dueInDays?: number;
-    };
-
-    const dueAt = dueInDays ? new Date(Date.now() + dueInDays * 86400000) : null;
-
-    const task = await this.taskRepo.create({
-      restaurantId,
-      title: title ?? 'Follow up',
-      description: description ?? null,
-      priority: priority ?? 'medium',
-      status: 'pending',
-      contactId: contact._id,
-      assignedTo: assignedTo ?? null,
-      flowExecutionId: executionId,
-      dueAt,
-    } as any);
-
-    return { success: true, action: 'create_task', metadata: { taskId: task._id.toString() } };
-  }
-
-  private async executeAssignOwner(): Promise<ActionResult> {
-    return { success: true, action: 'assign_owner' };
-  }
-
   private async executeWebhook(
     node: IFlowNode,
-    executionContext: Record<string, unknown>,
+    context: InterpolationContext,
   ): Promise<ActionResult> {
-    const { url } = node.config as { url: string };
+    const { url, body } = node.config as { url?: string; body?: string };
 
     if (!url) return { success: false, action: 'outgoing_webhook', error: 'No URL in config' };
 
+    let payload: Record<string, unknown>;
+    try {
+      const interpolated = CommunicationService.interpolate(body ?? '{}', context);
+      payload = JSON.parse(interpolated) as Record<string, unknown>;
+    } catch (err) {
+      log.error({ err, url }, 'Webhook body JSON parse failure');
+      return { success: false, action: 'outgoing_webhook', error: 'invalid_json' };
+    }
+
     try {
       await withRetry(
-        () => axios.post(url, executionContext, { timeout: 10_000 }),
+        () => axios.post(url, payload, { timeout: 10_000 }),
         { maxAttempts: 3, operationName: 'outgoing_webhook' },
       );
-
       return { success: true, action: 'outgoing_webhook', metadata: { url } };
     } catch (err) {
       return { success: false, action: 'outgoing_webhook', error: (err as Error).message };
-    }
-  }
-
-  private async executeMetaCAPI(
-    node: IFlowNode,
-    contact: IContactDocument,
-    executionContext: Record<string, unknown>,
-  ): Promise<ActionResult> {
-    const metaProvider = getMetaProvider();
-    if (!metaProvider) {
-      return { success: false, action: 'meta_capi', error: 'not configured' };
-    }
-
-    const { eventName } = node.config as { eventName?: string };
-
-    const result = await metaProvider.sendEvent({
-      eventName: eventName ?? 'Lead',
-      eventTime: Math.floor(Date.now() / 1000),
-      userData: {
-        email: contact.email,
-        firstName: contact.firstName,
-        lastName: contact.lastName,
-        externalId: contact._id.toString(),
-      },
-      customData: {
-        value: (executionContext.orderTotal as number) ?? undefined,
-        currency: (executionContext.currency as string) ?? 'USD',
-        orderId: (executionContext.orderId as string) ?? undefined,
-      },
-    });
-
-    return { success: result.success, action: 'meta_capi', error: result.error };
-  }
-
-  private async executeAdminNotification(
-    node: IFlowNode,
-    restaurantId: string,
-    context: InterpolationContext,
-    executionId: string,
-    flowId: string,
-  ): Promise<ActionResult> {
-    const { to, subject, body, channel } = node.config as {
-      to?: string;
-      subject?: string;
-      body?: string;
-      channel?: string;
-    };
-
-    if (!to) return { success: false, action: 'admin_notification', error: 'No recipient' };
-
-    try {
-      if (channel === 'sms') {
-        await this.communicationService.sendSMS({
-          restaurantId,
-          contactId: 'system',
-          to,
-          body,
-          context,
-          flowId,
-          executionId,
-        });
-      } else {
-        await this.communicationService.sendEmail({
-          restaurantId,
-          contactId: 'system',
-          to: to ? [to] : [],
-          subject,
-          body,
-          context,
-          flowId,
-          executionId,
-        });
-      }
-      return { success: true, action: 'admin_notification' };
-    } catch (err) {
-      return { success: false, action: 'admin_notification', error: (err as Error).message };
     }
   }
 }
