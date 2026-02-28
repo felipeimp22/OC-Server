@@ -328,7 +328,9 @@ describe('US-016: REST API — Flows', () => {
 
   describe('PUT /api/v1/flows/:id', () => {
     it('updates a draft flow and returns 200', async () => {
+      const draft = { _id: 'f1', name: 'Draft Flow', status: 'draft' };
       const updated = { _id: 'f1', name: 'Updated Name', status: 'draft' };
+      mockFlowService.getById.mockResolvedValue(draft);
       mockFlowService.update.mockResolvedValue(updated);
 
       const res = await app.inject({
@@ -342,7 +344,7 @@ describe('US-016: REST API — Flows', () => {
     });
 
     it('returns 400 when updating an active flow (must pause first)', async () => {
-      mockFlowService.update.mockRejectedValue(new Error('Cannot update an active flow. Pause it first.'));
+      mockFlowService.getById.mockResolvedValue({ _id: 'f1', status: 'active' });
 
       const res = await app.inject({
         method: 'PUT',
@@ -355,7 +357,7 @@ describe('US-016: REST API — Flows', () => {
     });
 
     it('returns 404 when flow not found', async () => {
-      mockFlowService.update.mockResolvedValue(null);
+      mockFlowService.getById.mockResolvedValue(null);
 
       const res = await app.inject({
         method: 'PUT',

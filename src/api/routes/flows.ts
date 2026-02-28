@@ -9,6 +9,7 @@ import { FlowService } from '../../services/FlowService.js';
 import { AnalyticsService } from '../../services/AnalyticsService.js';
 import { FlowExecutionRepository } from '../../repositories/FlowExecutionRepository.js';
 import { FLOW_TEMPLATES } from '../../seeds/seed.js';
+import { validateFlowGraph, FlowValidationError } from '../../lib/flowValidation.js';
 import {
   createFlowBody,
   updateFlowBody,
@@ -78,6 +79,13 @@ export async function flowRoutes(app: FastifyInstance): Promise<void> {
   // POST /api/v1/flows — Create flow
   app.post('/', async (request: FastifyRequest, reply: FastifyReply) => {
     const body = createFlowBody.parse(request.body);
+    // Run graph validation if nodes are provided
+    if (body.nodes && body.nodes.length > 0) {
+      const validation = validateFlowGraph(body.nodes as any, (body.edges ?? []) as any);
+      if (!validation.valid) {
+        return reply.code(422).send({ error: 'INVALID_GRAPH', rule: validation.rule, message: validation.message });
+      }
+    }
     const flow = await flowService.create(request.restaurantId, body as any);
     return reply.code(201).send(flow);
   });
@@ -86,6 +94,22 @@ export async function flowRoutes(app: FastifyInstance): Promise<void> {
   app.put('/:id', async (request: FastifyRequest, reply: FastifyReply) => {
     const { id } = idParam.parse(request.params);
     const body = updateFlowBody.parse(request.body);
+
+    // Check active status before graph validation to return 400 early
+    const existing = await flowService.getById(request.restaurantId, id);
+    if (!existing) return reply.code(404).send({ error: 'Flow not found' });
+    if (existing.status === 'active') {
+      return reply.code(400).send({ error: 'Cannot update an active flow. Pause it first.' });
+    }
+
+    // Run graph validation if nodes are provided
+    if (body.nodes && body.nodes.length > 0) {
+      const validation = validateFlowGraph(body.nodes as any, (body.edges ?? []) as any);
+      if (!validation.valid) {
+        return reply.code(422).send({ error: 'INVALID_GRAPH', rule: validation.rule, message: validation.message });
+      }
+    }
+
     try {
       const flow = await flowService.update(request.restaurantId, id, body as any);
       if (!flow) return reply.code(404).send({ error: 'Flow not found' });
@@ -115,6 +139,9 @@ export async function flowRoutes(app: FastifyInstance): Promise<void> {
       if (!flow) return reply.code(404).send({ error: 'Flow not found' });
       return flow;
     } catch (err: any) {
+      if (err instanceof FlowValidationError) {
+        return reply.code(422).send({ error: 'INVALID_GRAPH', rule: err.rule, message: err.message });
+      }
       return reply.code(400).send({ error: err.message });
     }
   });
