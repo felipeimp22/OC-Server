@@ -251,7 +251,9 @@ export class FlowEngineService {
       }
 
       case 'logic': {
-        await this.processLogicNode(execution, flow, node, contact, context);
+        log.error({ executionId, nodeId: node.id }, 'Legacy logic node encountered — completing execution');
+        await this.logNodeExecution(execution, node, 'skipped', 'Legacy logic node type not supported');
+        await this.completeExecution(execution);
         break;
       }
 
@@ -259,62 +261,6 @@ export class FlowEngineService {
         log.warn({ nodeType: node.type }, 'Unknown node type');
         await this.logNodeExecution(execution, node, 'skipped', `Unknown node type: ${node.type}`);
         await this.advanceToNext(execution, flow, node, null);
-    }
-  }
-
-  /**
-   * Process a logic node (stop, loop, until_condition, smart_date_sequence, etc.).
-   */
-  private async processLogicNode(
-    execution: IFlowExecutionDocument,
-    flow: IFlowDocument,
-    node: IFlowNode,
-    contact: IContactDocument,
-    context: Record<string, unknown>,
-  ): Promise<void> {
-    switch (node.subType) {
-      case 'stop': {
-        await this.logNodeExecution(execution, node, 'success', 'Flow stopped');
-        await this.completeExecution(execution);
-        break;
-      }
-
-      case 'loop': {
-        const maxIterations = (node.config.maxIterations as number) ?? 10;
-        const iterationKey = `_loop_${node.id}`;
-        const currentIteration = ((context[iterationKey] as number) ?? 0) + 1;
-
-        if (currentIteration > maxIterations) {
-          await this.logNodeExecution(execution, node, 'success', `Loop completed after ${maxIterations} iterations`);
-          await this.advanceToNext(execution, flow, node, null);
-        } else {
-          await this.executionRepo.advanceToNode(execution._id.toString(), node.id, {
-            [iterationKey]: currentIteration,
-          });
-          await this.logNodeExecution(execution, node, 'success', `Loop iteration ${currentIteration}/${maxIterations}`);
-          // Re-enter the loop body (advance to next)
-          await this.advanceToNext(execution, flow, node, 'loop_body');
-        }
-        break;
-      }
-
-      case 'until_condition': {
-        const untilTriggerNode = flow.nodes.find((n) => n.type === 'trigger') ?? node;
-        const condResult = this.conditionService.evaluate(node, untilTriggerNode, contact, context);
-        if (condResult.handle === 'yes') {
-          await this.logNodeExecution(execution, node, 'success', 'Until condition met — advancing');
-          await this.advanceToNext(execution, flow, node, 'met');
-        } else {
-          await this.logNodeExecution(execution, node, 'success', 'Until condition not met — looping');
-          await this.advanceToNext(execution, flow, node, 'not_met');
-        }
-        break;
-      }
-
-      default: {
-        await this.logNodeExecution(execution, node, 'success', `Logic node: ${node.subType}`);
-        await this.advanceToNext(execution, flow, node, null);
-      }
     }
   }
 
