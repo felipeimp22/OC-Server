@@ -8,6 +8,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import Fastify from 'fastify';
 import type { FastifyInstance } from 'fastify';
+import { FlowValidationError } from '@/lib/flowValidation.js';
 
 // ── Mocks ──────────────────────────────────────────────────────────────────
 
@@ -322,6 +323,24 @@ describe('US-016: REST API — Flows', () => {
 
       expect(res.statusCode).toBe(400);
     });
+
+    it('returns 422 INVALID_GRAPH when validateFlowGraph fails (two triggers)', async () => {
+      const res = await app.inject({
+        method: 'POST',
+        url: '/api/v1/flows',
+        payload: {
+          name: 'Bad Graph Flow',
+          nodes: [
+            { id: 'n1', type: 'trigger', subType: 'order_completed' },
+            { id: 'n2', type: 'trigger', subType: 'first_order' },
+          ],
+          edges: [],
+        },
+      });
+
+      expect(res.statusCode).toBe(422);
+      expect(res.json()).toMatchObject({ error: 'INVALID_GRAPH', rule: 'R-1' });
+    });
   });
 
   // ── PUT /api/v1/flows/:id ────────────────────────────────────────────────
@@ -366,6 +385,27 @@ describe('US-016: REST API — Flows', () => {
       });
 
       expect(res.statusCode).toBe(404);
+    });
+
+    it('returns 422 INVALID_GRAPH when graph validation fails on update', async () => {
+      const draft = { _id: 'f1', name: 'Draft Flow', status: 'draft' };
+      mockFlowService.getById.mockResolvedValue(draft);
+
+      const res = await app.inject({
+        method: 'PUT',
+        url: '/api/v1/flows/f1',
+        payload: {
+          name: 'Updated',
+          nodes: [
+            { id: 'n1', type: 'trigger', subType: 'order_completed' },
+            { id: 'n2', type: 'trigger', subType: 'first_order' },
+          ],
+          edges: [],
+        },
+      });
+
+      expect(res.statusCode).toBe(422);
+      expect(res.json()).toMatchObject({ error: 'INVALID_GRAPH', rule: 'R-1' });
     });
   });
 
@@ -421,6 +461,21 @@ describe('US-016: REST API — Flows', () => {
 
       expect(res.statusCode).toBe(400);
       expect(res.json()).toMatchObject({ error: expect.stringContaining('trigger') });
+    });
+
+    it('returns 422 INVALID_GRAPH with rule and message when FlowValidationError thrown', async () => {
+      mockFlowService.activate.mockRejectedValue(
+        new FlowValidationError('R-1', 'Flow must have exactly one trigger node'),
+      );
+
+      const res = await app.inject({ method: 'POST', url: '/api/v1/flows/f1/activate' });
+
+      expect(res.statusCode).toBe(422);
+      expect(res.json()).toMatchObject({
+        error: 'INVALID_GRAPH',
+        rule: 'R-1',
+        message: 'Flow must have exactly one trigger node',
+      });
     });
 
     it('returns 404 when flow not found', async () => {
