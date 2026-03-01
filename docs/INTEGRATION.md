@@ -219,6 +219,8 @@ Email/SMS inline composers use `{{dot.notation}}` variables scoped to the trigge
 | `order_status_changed` (supports `config.targetStatus` filter — if set, fires only when `newStatus` matches; if empty/unset, fires on every status change) | `{{order.number}}`, `{{order.status}}` |
 | `abandoned_cart` | `{{cart.items_summary}}`, `{{cart.total}}`, `{{cart.abandon_time}}` |
 | `no_order_in_x_days` | `{{customer.last_order_date}}`, `{{customer.days_since_order}}` |
+| `item_ordered` | `{{order.total}}`, `{{order.number}}`, `{{order.items_summary}}`, `{{order.date}}`, `{{matched_item.name}}`, `{{matched_item.price}}` |
+| `item_ordered_x_times` | `{{order.total}}`, `{{order.number}}`, `{{order.items_summary}}`, `{{order.date}}`, `{{matched_item.name}}`, `{{matched_item.total_orders}}` |
 
 #### Variable Resolution Notes
 
@@ -244,6 +246,11 @@ Each trigger node stores its configuration in `node.config`. The backend reads t
 | `abandoned_cart` | `delayDays` | `number` | 1 | `CartEventConsumer.handleCartAbandoned()` — schedules BullMQ delayed job with `delayDays * 86400000` ms delay (1–90 days) |
 | `first_order` | — | — | — | — |
 | `new_order` | — | — | — | — |
+| `item_ordered` | `items` | `Array<{ menuItemId, menuItemName, modifiers?[] }>` | — | `TriggerService.checkTriggerConditions()` |
+| `item_ordered` | `matchMode` | `'any' \| 'all'` | `'any'` | `TriggerService.checkTriggerConditions()` |
+| `item_ordered_x_times` | `items` | `Array<{ menuItemId, menuItemName, modifiers?[] }>` | — | `TriggerService.checkTriggerConditions()` |
+| `item_ordered_x_times` | `matchMode` | `'any' \| 'all'` | `'any'` | `TriggerService.checkTriggerConditions()` |
+| `item_ordered_x_times` | `threshold` | `number` (min 2) | — | `TriggerService.checkTriggerConditions()` |
 
 ---
 

@@ -33,6 +33,10 @@ export const TriggerType = {
   NTH_ORDER: 'nth_order',
   /** Fires when customer has not ordered in X days (scheduled) */
   NO_ORDER_IN_X_DAYS: 'no_order_in_x_days',
+  /** Fires when an order contains specific menu items (optionally with modifier matching) */
+  ITEM_ORDERED: 'item_ordered',
+  /** Fires when a customer has ordered specific items X times (cumulative, exact threshold) */
+  ITEM_ORDERED_X_TIMES: 'item_ordered_x_times',
 
   // ── CRM Triggers ───────────────────────────────────────
   /** Fires when a tag is applied to a contact */

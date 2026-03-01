@@ -15,6 +15,7 @@ import { TriggerService } from '../../services/TriggerService.js';
 import { FlowRepository } from '../../repositories/FlowRepository.js';
 import { abandonedCartQueue } from './CartEventConsumer.js';
 import { tryProcessEvent } from '../../utils/idempotency.js';
+import { Order } from '../../domain/models/external/Order.js';
 import { createLogger } from '../../config/logger.js';
 
 const log = createLogger('OrderEventConsumer');
@@ -172,7 +173,29 @@ export class OrderEventConsumer {
       orderTotal,
     );
 
-    // Build trigger context — events don't publish items
+    // Build trigger context — fetch order items from DB (events don't publish items)
+    let items: Array<{ menuItemId: string; name: string; price: number; quantity: number; options: Array<{ name: string; choice: string; priceAdjustment: number }> }> = [];
+    if (orderId) {
+      try {
+        const order = await Order.findById(orderId).lean().exec();
+        if (order?.items && Array.isArray(order.items)) {
+          items = order.items.map((item: any) => ({
+            menuItemId: String(item.menuItemId),
+            name: item.name,
+            price: item.price,
+            quantity: item.quantity,
+            options: (item.options ?? []).map((opt: any) => ({
+              name: opt.name,
+              choice: opt.choice,
+              priceAdjustment: opt.priceAdjustment ?? 0,
+            })),
+          }));
+        }
+      } catch (err) {
+        log.warn({ err, orderId }, 'Failed to fetch order items for trigger context');
+      }
+    }
+
     const triggerContext = {
       orderId,
       orderNumber: payload.orderNumber as string | undefined,
@@ -184,6 +207,7 @@ export class OrderEventConsumer {
       orderTotal,
       paymentStatus: payload.paymentStatus as string | undefined,
       status: payload.status as string | undefined,
+      items,
     };
 
     // Evaluate order_completed triggers
@@ -277,8 +301,32 @@ export class OrderEventConsumer {
       email: payload.customerEmail as string | undefined,
     });
 
+    // Fetch order items from DB for trigger context (events don't publish items)
+    const newOrderId = payload.orderId as string | undefined;
+    let newOrderItems: Array<{ menuItemId: string; name: string; price: number; quantity: number; options: Array<{ name: string; choice: string; priceAdjustment: number }> }> = [];
+    if (newOrderId) {
+      try {
+        const order = await Order.findById(newOrderId).lean().exec();
+        if (order?.items && Array.isArray(order.items)) {
+          newOrderItems = order.items.map((item: any) => ({
+            menuItemId: String(item.menuItemId),
+            name: item.name,
+            price: item.price,
+            quantity: item.quantity,
+            options: (item.options ?? []).map((opt: any) => ({
+              name: opt.name,
+              choice: opt.choice,
+              priceAdjustment: opt.priceAdjustment ?? 0,
+            })),
+          }));
+        }
+      } catch (err) {
+        log.warn({ err, orderId: newOrderId }, 'Failed to fetch order items for new_order trigger context');
+      }
+    }
+
     const triggerContext = {
-      orderId: payload.orderId as string | undefined,
+      orderId: newOrderId,
       orderNumber: payload.orderNumber as string | undefined,
       customerId,
       customerEmail: payload.customerEmail as string | undefined,
@@ -288,6 +336,7 @@ export class OrderEventConsumer {
       orderTotal: (payload.orderTotal as number) ?? 0,
       paymentStatus: payload.paymentStatus as string | undefined,
       paymentMethod: payload.paymentMethod as string | undefined,
+      items: newOrderItems,
     };
 
     // Evaluate new_order triggers
