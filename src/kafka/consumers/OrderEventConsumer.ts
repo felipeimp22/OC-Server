@@ -82,7 +82,7 @@ export class OrderEventConsumer {
           break;
 
         case 'order.status_changed':
-          await this.handleOrderEvent('order_status_changed', payload, restaurantId);
+          await this.handleOrderStatusChanged(payload, restaurantId);
           break;
 
         case 'payment.succeeded':
@@ -106,17 +106,45 @@ export class OrderEventConsumer {
   }
 
   /**
-   * Handle order.completed — upsert contact, update stats, trigger flows.
+   * Handle order.completed — delegates to shared processOrderAsCompleted.
    */
   private async handleOrderCompleted(
     payload: Record<string, unknown>,
     eventRestaurantId?: string,
   ): Promise<void> {
     const restaurantId = (eventRestaurantId ?? payload.restaurantId) as string;
+    await this.processOrderAsCompleted(payload, restaurantId);
+  }
+
+  /**
+   * Shared order-completed processing logic.
+   *
+   * Called from both handleOrderCompleted (order.completed event) and
+   * handleOrderStatusChanged (when status reaches a qualifying fulfillment status).
+   *
+   * Uses tryProcessEvent with a synthetic key 'order_completed_process:${orderId}'
+   * to ensure this runs exactly once per order, even if multiple Kafka events fire
+   * (e.g., order.status_changed AND order.completed both arrive for the same order).
+   */
+  private async processOrderAsCompleted(
+    payload: Record<string, unknown>,
+    restaurantId: string,
+  ): Promise<void> {
     const customerId = payload.customerId as string;
+    const orderId = payload.orderId as string;
 
     if (!restaurantId || !customerId) {
-      log.warn({ restaurantId, customerId }, 'order.completed missing restaurantId or customerId — skipping');
+      log.warn({ restaurantId, customerId }, 'processOrderAsCompleted missing restaurantId or customerId — skipping');
+      return;
+    }
+
+    // Application-level idempotency: ensure we only process order completion once per order
+    const shouldProcess = await tryProcessEvent(
+      `order_completed_process:${orderId}`,
+      'order_completed_process',
+    );
+    if (!shouldProcess) {
+      log.info({ orderId }, 'Order already processed as completed — skipping duplicate');
       return;
     }
 
@@ -135,24 +163,66 @@ export class OrderEventConsumer {
       orderTotal,
     );
 
-    // Evaluate order_completed triggers
-    await this.triggerService.evaluateTriggers(restaurantId, 'order_completed', contact._id.toString(), {
-      orderId: payload.orderId as string,
-      orderTotal,
-      orderType: payload.orderType as string,
+    // Build trigger context — events don't publish items
+    const triggerContext = {
+      orderId,
+      orderNumber: payload.orderNumber as string | undefined,
       customerId,
-    });
+      customerEmail: payload.customerEmail as string | undefined,
+      customerName: payload.customerName as string | undefined,
+      customerPhone: payload.customerPhone as string | undefined,
+      orderType: payload.orderType as string | undefined,
+      orderTotal,
+      paymentStatus: payload.paymentStatus as string | undefined,
+      status: payload.status as string | undefined,
+    };
+
+    // Evaluate order_completed triggers
+    await this.triggerService.evaluateTriggers(restaurantId, 'order_completed', contact._id.toString(), triggerContext);
 
     // First order trigger: fire if this was the customer's very first order
     if (updatedContact && updatedContact.totalOrders === 1) {
       log.info({ restaurantId, customerId }, 'First order detected — firing first_order trigger');
-      await this.triggerService.evaluateTriggers(restaurantId, 'first_order', contact._id.toString(), {
-        orderId: payload.orderId as string,
-        orderTotal,
-        orderType: payload.orderType as string,
-        customerId,
+      await this.triggerService.evaluateTriggers(restaurantId, 'first_order', contact._id.toString(), triggerContext);
+    }
+
+    // Nth order trigger: fire for every completed order (TriggerService checks config.n against contact's totalOrders)
+    if (updatedContact && updatedContact.totalOrders > 1) {
+      await this.triggerService.evaluateTriggers(restaurantId, 'nth_order', contact._id.toString(), {
+        ...triggerContext,
+        totalOrders: updatedContact.totalOrders,
       });
     }
+  }
+
+  /**
+   * Handle order.status_changed — evaluate order_status_changed triggers.
+   */
+  private async handleOrderStatusChanged(
+    payload: Record<string, unknown>,
+    eventRestaurantId?: string,
+  ): Promise<void> {
+    const restaurantId = (eventRestaurantId ?? payload.restaurantId) as string;
+    const customerId = payload.customerId as string;
+    if (!restaurantId || !customerId) {
+      log.warn({ restaurantId, customerId }, 'order.status_changed missing restaurantId or customerId — skipping');
+      return;
+    }
+
+    const contact = await this.contactService.getByCustomerId(restaurantId, customerId);
+    if (!contact) return;
+
+    await this.triggerService.evaluateTriggers(restaurantId, 'order_status_changed', contact._id.toString(), {
+      orderId: payload.orderId as string | undefined,
+      orderNumber: payload.orderNumber as string | undefined,
+      customerId,
+      customerEmail: payload.customerEmail as string | undefined,
+      customerName: payload.customerName as string | undefined,
+      orderType: payload.orderType as string | undefined,
+      orderTotal: payload.orderTotal as number | undefined,
+      newStatus: (payload.status ?? payload.newStatus) as string | undefined,
+      previousStatus: (payload.previousStatus ?? payload.oldStatus) as string | undefined,
+    });
   }
 
   /**
@@ -176,7 +246,16 @@ export class OrderEventConsumer {
       return;
     }
 
-    await this.triggerService.evaluateTriggers(restaurantId, 'payment_failed', contact._id.toString(), payload);
+    await this.triggerService.evaluateTriggers(restaurantId, 'payment_failed', contact._id.toString(), {
+      orderId: payload.orderId as string | undefined,
+      orderNumber: payload.orderNumber as string | undefined,
+      customerId,
+      customerEmail: payload.customerEmail as string | undefined,
+      customerName: payload.customerName as string | undefined,
+      orderTotal: payload.orderTotal as number | undefined,
+      paymentStatus: payload.paymentStatus as string | undefined,
+      failureReason: (payload.failureReason ?? payload.failure_reason) as string | undefined,
+    });
   }
 
   /**

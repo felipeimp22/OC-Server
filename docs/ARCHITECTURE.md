@@ -125,6 +125,40 @@ Prefixed with `crm_` to avoid collisions:
 - `crm_link_tracking`, `crm_review_requests`
 - `crm_campaigns`, `crm_tasks`, `crm_processed_events`
 
+## Frontend Integration — Node Format
+
+The React Flow canvas (in `oc-restaurant-manager`) uses a different node representation than the `IFlowNode` interface stored in MongoDB.
+
+### React Flow format (in-browser / Zustand store)
+```json
+{
+  "id": "node-abc",
+  "type": "trigger",
+  "position": { "x": 100, "y": 100 },
+  "data": {
+    "subType": "order_completed",
+    "label": "Order Completed",
+    "config": {}
+  }
+}
+```
+
+### IFlowNode format (API / MongoDB)
+```json
+{
+  "id": "node-abc",
+  "type": "trigger",
+  "subType": "order_completed",
+  "label": "Order Completed",
+  "config": {},
+  "position": { "x": 100, "y": 100 }
+}
+```
+
+**Critical**: `FlowRepository.findActiveByTrigger` queries `nodes.subType` at the top level. If subType is nested inside `data`, flows will never be found. The transformation happens in `useFlowBuilderStore.ts` via `toReactFlowNodes`/`fromReactFlowNodes` (and their single-item variants) before saving and after loading.
+
+---
+
 ## Flow Engine — DAG Processing
 
 Flows are directed acyclic graphs (DAGs):
@@ -187,3 +221,36 @@ All topic names are defined in `src/kafka/topics.ts` (`KAFKA_TOPICS`):
 | TimerService | Timer scheduling via BullMQ (delay + date_field subtypes) |
 | WebhookService | Outgoing webhook execution with variable interpolation |
 | InactivityChecker | Daily cron (0 8 * * *) for no_order_in_x_days enrollment |
+
+## Order-Level Deduplication
+
+Two complementary dedup mechanisms prevent duplicate processing and enrollment for order-related triggers:
+
+### 1. `tryProcessEvent` — Cross-Event-Path Dedup (OrderEventConsumer)
+
+When an order reaches a qualifying status, `processOrderAsCompleted()` is the shared handler for both `order.completed` and `order.status_changed` Kafka events. It uses `tryProcessEvent` with a synthetic key `order_completed_process:${orderId}` (stored in the `crm_processed_events` collection with a unique index).
+
+This ensures stats (`incrementOrderStats`) are incremented exactly once per order, even when `kitchen.actions.ts` publishes BOTH `order.status_changed` AND `order.completed` events for the same status change to `completed`.
+
+```
+order.status_changed (status=completed) → processOrderAsCompleted()
+  → tryProcessEvent('order_completed_process:ORDER123') → first call: proceeds ✓
+order.completed → processOrderAsCompleted()
+  → tryProcessEvent('order_completed_process:ORDER123') → duplicate: skips ✗
+```
+
+### 2. `hasOrderBeenProcessedForFlow` — Per-Flow Enrollment Dedup (TriggerService)
+
+Queries `crm_flow_executions` for `{ restaurantId, flowId, 'context.orderId': orderId }` with **no status filter** — counts active, completed, stopped, and error executions. Returns true if count > 0.
+
+This prevents a single order from enrolling in the same flow more than once, even across multiple qualifying status changes (e.g., order goes `ready` → `delivered` — both are qualifying statuses, but the flow should only fire once per order).
+
+```
+order status → 'ready' → order_completed trigger fires → flow enrolled ✓
+order status → 'delivered' → order_completed trigger fires → hasOrderBeenProcessedForFlow → already enrolled ✗
+```
+
+### Why Both Are Needed
+
+- **`tryProcessEvent`** prevents double stats increment across two Kafka event paths (order.status_changed + order.completed both fire when status='completed')
+- **`hasOrderBeenProcessedForFlow`** prevents per-flow re-enrollment across multiple qualifying status changes (ready → delivered → completed all qualify)
