@@ -75,7 +75,7 @@ Retry path: if HTTP delivery fails, the `/api/cron/crm-events` cron in `oc-resta
 6. **Flow enrollment** — create a FlowExecution for each matching flow
 7. **Node processing** — the Flow Engine traverses the DAG node by node:
    - **Trigger**: Already matched, advance to next node
-   - **Action**: Execute via ActionService (send_email, send_sms, outgoing_webhook); action nodes are terminal (no outgoing edges)
+   - **Action**: Execute via ActionService (send_email, send_sms, outgoing_webhook); action nodes may chain to other actions, timers, or conditions (fan-out supported)
    - **Condition**: Evaluate via ConditionService using trigger-bound semantics; yes/no branch selection
    - **Timer**: Schedule via BullMQ, pause execution until timer fires
 8. **Completion** — when no more downstream nodes, mark execution as completed
@@ -180,7 +180,7 @@ Flows are directed acyclic graphs (DAGs):
 | Type | Purpose | Sub-types |
 |------|---------|-----------|
 | Trigger | Entry point | 7 event types: new_order, order_completed, order_status_changed, abandoned_cart, first_order, nth_order, no_order_in_x_days. **new_order** fires on payment.succeeded (uses upsertFromEvent for first-time customers). **order_completed fires on fulfillment statuses** (ready, out_for_delivery, delivered, completed) — not just manual 'completed'. |
-| Action | Execute task | 3 action types: send_email, send_sms, outgoing_webhook |
+| Action | Execute task (may chain to other actions, timers, or conditions) | 3 action types: send_email, send_sms, outgoing_webhook |
 | Condition | Branch logic | yes_no (trigger-bound — reads filter from trigger node config; no operator UI) |
 | Timer | Delay execution | delay, date_field |
 
@@ -210,7 +210,7 @@ All topic names are defined in `src/kafka/topics.ts` (`KAFKA_TOPICS`):
 
 | Service | Responsibility |
 |---------|---------------|
-| FlowService | Flow CRUD, activation, graph validation (9 rules R-1..R-9) |
+| FlowService | Flow CRUD, activation, graph validation (11 rules R-1..R-11) |
 | FlowEngineService | DAG traversal and node execution orchestration |
 | TriggerService | Event → flow matching and enrollment |
 | ActionService | Action node execution: send_email, send_sms, outgoing_webhook |

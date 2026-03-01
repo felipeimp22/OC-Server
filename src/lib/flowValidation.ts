@@ -1,6 +1,6 @@
 /**
  * @fileoverview Server-side flow graph validation.
- * Enforces the 9 structural rules for CRM automation flows.
+ * Enforces the 11 structural rules for CRM automation flows.
  *
  * @module lib/flowValidation
  */
@@ -23,7 +23,7 @@ export class FlowValidationError extends Error {
 }
 
 /**
- * Validate a flow graph against the 10 structural rules.
+ * Validate a flow graph against the 11 structural rules.
  */
 export function validateFlowGraph(
   nodes: IFlowNode[],
@@ -61,19 +61,9 @@ export function validateFlowGraph(
     return { valid: false, rule: 'R-5', message: 'Flow contains a cycle, which is not allowed.' };
   }
 
-  // ── R-4: Action nodes have no outgoing edges ───────────────────────
-  for (const node of nodes) {
-    if (node.type === 'action') {
-      const out = outEdges.get(node.id) ?? [];
-      if (out.length > 0) {
-        return {
-          valid: false,
-          rule: 'R-4',
-          message: `Action node "${node.label || node.id}" must be terminal (no outgoing edges).`,
-        };
-      }
-    }
-  }
+  // ── R-4: Action nodes MAY have outgoing edges (action chaining/fan-out).
+  // Action nodes with zero outgoing edges are still valid (terminal).
+  // No validation needed — outgoing edges from actions are allowed.
 
   // ── R-7: Timer has exactly one incoming and one outgoing edge ──────
   for (const node of nodes) {
@@ -98,7 +88,7 @@ export function validateFlowGraph(
   }
 
   // ── R-6: yes_no condition has exactly 2 outgoing edges (yes + no) ──
-  // Both branches must terminate in an action node (optionally preceded by a timer)
+  // Both branches must eventually terminate in an action node (may pass through timers or other actions first)
   for (const node of nodes) {
     if (node.type === 'condition' && node.subType === 'yes_no') {
       const out = outEdges.get(node.id) ?? [];
@@ -118,7 +108,7 @@ export function validateFlowGraph(
           message: `Yes/No condition "${node.label || node.id}" must have "yes" and "no" outgoing handles.`,
         };
       }
-      // Validate each branch: timer? → action
+      // Validate each branch: DFS to verify every leaf node is an action
       for (const edge of out) {
         const target = nodeById.get(edge.targetNodeId);
         if (!target) continue;
@@ -130,18 +120,25 @@ export function validateFlowGraph(
     }
   }
 
-  // ── R-2: yes_no condition only at depth 1 from trigger ─────────────
-  // Depth 1 = direct children of the trigger node
+  // ── R-2: yes_no condition as direct child of trigger OR action node ─
   const triggerChildren = new Set(
     (outEdges.get(triggerNode.id) ?? []).map((e) => e.targetNodeId),
   );
+  const actionChildren = new Set<string>();
+  for (const node of nodes) {
+    if (node.type === 'action') {
+      for (const edge of outEdges.get(node.id) ?? []) {
+        actionChildren.add(edge.targetNodeId);
+      }
+    }
+  }
   for (const node of nodes) {
     if (node.type === 'condition' && node.subType === 'yes_no') {
-      if (!triggerChildren.has(node.id)) {
+      if (!triggerChildren.has(node.id) && !actionChildren.has(node.id)) {
         return {
           valid: false,
           rule: 'R-2',
-          message: `Yes/No condition "${node.label || node.id}" must be a direct child of the trigger node.`,
+          message: `Yes/No condition "${node.label || node.id}" must be a direct child of the trigger node or an action node.`,
         };
       }
     }
@@ -213,45 +210,63 @@ export function validateFlowGraph(
     }
   }
 
+  // ── R-11: Fan-out constraint — max 10 outgoing edges per node ──────
+  for (const node of nodes) {
+    const out = outEdges.get(node.id) ?? [];
+    if (out.length > 10) {
+      return {
+        valid: false,
+        rule: 'R-11',
+        message: `Node "${node.label || node.id}" has ${out.length} outgoing edges, exceeding the maximum of 10.`,
+      };
+    }
+  }
+
   return { valid: true };
 }
 
 /**
- * Validate a branch from a yes_no condition: must be timer→action or directly action.
+ * Validate a branch from a yes_no condition using DFS.
+ * Every leaf node (no outgoing edges) must be an action node.
+ * Branches may pass through timers, other actions, or other conditions first.
  */
 function validateConditionBranch(
-  node: IFlowNode,
+  startNode: IFlowNode,
   nodeById: Map<string, IFlowNode>,
   outEdges: Map<string, IFlowEdge[]>,
 ): ValidationResult {
-  if (node.type === 'action') {
-    return { valid: true };
-  }
-  if (node.type === 'timer') {
-    // Timer must lead to exactly one action node
+  // DFS: follow all paths from startNode. Every leaf (node with no outgoing edges) must be an action.
+  const visited = new Set<string>();
+
+  function dfs(node: IFlowNode): ValidationResult {
+    if (visited.has(node.id)) return { valid: true }; // cycles caught by R-5
+    visited.add(node.id);
+
     const out = outEdges.get(node.id) ?? [];
-    if (out.length !== 1) {
-      return {
-        valid: false,
-        rule: 'R-6',
-        message: `Timer "${node.label || node.id}" in condition branch must have exactly one outgoing edge.`,
-      };
+
+    if (out.length === 0) {
+      // Leaf node — must be an action
+      if (node.type !== 'action') {
+        return {
+          valid: false,
+          rule: 'R-6',
+          message: `Condition branch must eventually terminate in an action node, but found terminal ${node.type} node "${node.label || node.id}".`,
+        };
+      }
+      return { valid: true };
     }
-    const next = nodeById.get(out[0]!.targetNodeId);
-    if (!next || next.type !== 'action') {
-      return {
-        valid: false,
-        rule: 'R-6',
-        message: `Condition branch timer "${node.label || node.id}" must be followed by an action node.`,
-      };
+
+    // Non-leaf: follow all outgoing edges
+    for (const edge of out) {
+      const target = nodeById.get(edge.targetNodeId);
+      if (!target) continue;
+      const result = dfs(target);
+      if (!result.valid) return result;
     }
     return { valid: true };
   }
-  return {
-    valid: false,
-    rule: 'R-6',
-    message: `Condition branch must terminate in an action node (optionally preceded by a timer), but found type "${node.type}".`,
-  };
+
+  return dfs(startNode);
 }
 
 /**
