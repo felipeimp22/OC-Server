@@ -206,8 +206,9 @@ Email/SMS inline composers use `{{dot.notation}}` variables scoped to the trigge
 | `{{customer.email}}` | Contact's email | `contact.email` |
 | `{{customer.phone}}` | Contact's phone | `contact.phone` (object `{countryCode, number}` or plain string); falls back to `payload.customerPhone` |
 | `{{restaurant.name}}` | Restaurant name | `restaurant.name` |
-| `{{restaurant.owner_name}}` | Restaurant owner's name | `restaurant.ownerName` → `restaurant.name` fallback |
 | `{{restaurant.phone}}` | Restaurant phone | `restaurant.phone` |
+
+> **Backwards-compat alias:** `{{restaurant.owner_name}}` is silently rewritten to `{{restaurant.name}}` before interpolation, so old saved flow templates continue to render correctly. The variable is no longer shown in the variable picker.
 
 ### Trigger-Specific Variables
 

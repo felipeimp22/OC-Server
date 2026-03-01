@@ -62,7 +62,9 @@ function resolveKey(key: string, context: Record<string, unknown>): string | num
  * ```
  */
 export function interpolate(template: string, context: InterpolationContext): string {
-  return template.replace(VARIABLE_PATTERN, (_match, key: string) => {
+  // Backwards-compat alias: old saved flows may still use {{restaurant.owner_name}}
+  const normalized = template.replace(/\{\{\s*restaurant\.owner_name\s*\}\}/g, '{{restaurant.name}}');
+  return normalized.replace(VARIABLE_PATTERN, (_match, key: string) => {
     const value = resolveKey(key, context);
     if (value === null || value === undefined) {
       return ''; // Unknown or null vars replaced with empty string
@@ -207,7 +209,6 @@ export async function buildContext(
 
     ctx.restaurant = {
       name: String(restaurant.name ?? ''),
-      owner_name: String(restaurant.ownerName ?? restaurant.owner_name ?? restaurant.name ?? ''),
       phone: String(restaurant.phone ?? ''),
       email: String(restaurant.email ?? ''),
     };
