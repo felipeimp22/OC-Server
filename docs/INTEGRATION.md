@@ -213,6 +213,7 @@ Email/SMS inline composers use `{{dot.notation}}` variables scoped to the trigge
 
 | Trigger | Additional Variables |
 |---------|---------------------|
+| `new_order` (fires on payment.succeeded — uses upsertFromEvent for first-time customers, does NOT increment stats) | `{{order.total}}`, `{{order.number}}`, `{{payment.method}}` |
 | `order_completed` (fires once on first qualifying fulfillment status: ready, out_for_delivery, delivered, completed), `first_order`, `nth_order` | `{{order.total}}`, `{{order.number}}`, `{{order.items_summary}}`, `{{order.date}}` |
 | `payment_failed` | `{{order.total}}`, `{{order.number}}`, `{{payment.failure_reason}}` |
 | `order_status_changed` (supports `config.targetStatus` filter — if set, fires only when `newStatus` matches; if empty/unset, fires on every status change) | `{{order.number}}`, `{{order.status}}` |

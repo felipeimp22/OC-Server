@@ -179,7 +179,7 @@ Flows are directed acyclic graphs (DAGs):
 
 | Type | Purpose | Sub-types |
 |------|---------|-----------|
-| Trigger | Entry point | 7 event types: order_completed, payment_failed, order_status_changed, abandoned_cart, first_order, nth_order, no_order_in_x_days. **order_completed fires on fulfillment statuses** (ready, out_for_delivery, delivered, completed) — not just manual 'completed'. |
+| Trigger | Entry point | 8 event types: new_order, order_completed, payment_failed, order_status_changed, abandoned_cart, first_order, nth_order, no_order_in_x_days. **new_order** fires on payment.succeeded (uses upsertFromEvent for first-time customers). **order_completed fires on fulfillment statuses** (ready, out_for_delivery, delivered, completed) — not just manual 'completed'. |
 | Action | Execute task | 3 action types: send_email, send_sms, outgoing_webhook |
 | Condition | Branch logic | yes_no (trigger-bound — reads filter from trigger node config; no operator UI) |
 | Timer | Delay execution | delay, date_field |
@@ -243,7 +243,7 @@ order.completed → processOrderAsCompleted()
 
 Queries `crm_flow_executions` for `{ restaurantId, flowId, 'context.orderId': orderId }` with **no status filter** — counts active, completed, stopped, and error executions. Returns true if count > 0.
 
-This prevents a single order from enrolling in the same flow more than once, even across multiple qualifying status changes (e.g., order goes `ready` → `delivered` — both are qualifying statuses, but the flow should only fire once per order).
+This prevents a single order from enrolling in the same flow more than once. Used for both `order_completed` (multiple qualifying status changes) and `new_order` (payment.succeeded) triggers.
 
 ```
 order status → 'ready' → order_completed trigger fires → flow enrolled ✓
@@ -267,7 +267,7 @@ When an order status changes, two Kafka event paths can fire `processOrderAsComp
 1. **`order.status_changed`** → `handleOrderStatusChanged()` checks if `newStatus` is in `ORDER_COMPLETED_QUALIFYING_STATUSES` → calls `processOrderAsCompleted()`
 2. **`order.completed`** → `handleOrderCompleted()` → calls `processOrderAsCompleted()`
 
-Both paths converge on `processOrderAsCompleted()`, which uses `tryProcessEvent` to ensure it runs exactly once per order. Additionally, `TriggerService.evaluateSingleFlow` uses `hasOrderBeenProcessedForFlow` for per-flow dedup when `eventType === 'order_completed'`.
+Both paths converge on `processOrderAsCompleted()`, which uses `tryProcessEvent` to ensure it runs exactly once per order. Additionally, `TriggerService.evaluateSingleFlow` uses `hasOrderBeenProcessedForFlow` for per-flow dedup when `eventType === 'order_completed'` or `eventType === 'new_order'`.
 
 ```
 order status → 'ready'    → order.status_changed → processOrderAsCompleted ✓ (first qualifying)
@@ -276,7 +276,22 @@ order status → 'completed' → order.status_changed → processOrderAsComplete
                            → order.completed      → processOrderAsCompleted ✗ (tryProcessEvent blocks)
 ```
 
-### Why Both Are Needed
+### New Order Trigger (`new_order`)
+
+The `new_order` trigger fires on `payment.succeeded` Kafka events. Unlike `order_completed`, it:
+- Uses `upsertFromEvent()` to create CRM contacts for first-time customers (fixes the previous `handleOrderEvent` bug where `getByCustomerId()` returned null)
+- Does **NOT** increment order stats — payment confirmation is not order completion
+- Also evaluates `payment_succeeded` triggers for backward compatibility
+- Uses `hasOrderBeenProcessedForFlow` for per-flow orderId dedup (one fire per order per flow)
+
+```
+payment.succeeded → handleNewOrder()
+  → upsertFromEvent (creates contact if new)
+  → evaluateTriggers('new_order', ...) — per-flow orderId dedup
+  → evaluateTriggers('payment_succeeded', ...) — backward compat
+```
+
+### Why Both Dedup Mechanisms Are Needed
 
 - **`tryProcessEvent`** prevents double stats increment across two Kafka event paths (order.status_changed + order.completed both fire when status='completed')
-- **`hasOrderBeenProcessedForFlow`** prevents per-flow re-enrollment across multiple qualifying status changes (ready → delivered → completed all qualify)
+- **`hasOrderBeenProcessedForFlow`** prevents per-flow re-enrollment across multiple qualifying status changes (ready → delivered → completed all qualify) and ensures one new_order fire per order per flow

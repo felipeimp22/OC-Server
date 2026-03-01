@@ -94,7 +94,7 @@ export class OrderEventConsumer {
           break;
 
         case 'payment.succeeded':
-          await this.handleOrderEvent('payment_succeeded', payload, restaurantId);
+          await this.handleNewOrder(payload, restaurantId);
           break;
 
         case 'payment.failed':
@@ -242,6 +242,53 @@ export class OrderEventConsumer {
       log.info({ orderId: payload.orderId, newStatus }, 'Qualifying fulfillment status — firing processOrderAsCompleted');
       await this.processOrderAsCompleted(payload, restaurantId);
     }
+  }
+
+  /**
+   * Handle payment.succeeded — evaluate new_order triggers.
+   *
+   * Uses upsertFromEvent() instead of getByCustomerId() so that first-time
+   * customers are created in the CRM before trigger evaluation.
+   * Does NOT increment order stats — that only happens in processOrderAsCompleted().
+   * Also evaluates payment_succeeded triggers for backward compatibility.
+   */
+  private async handleNewOrder(
+    payload: Record<string, unknown>,
+    eventRestaurantId?: string,
+  ): Promise<void> {
+    const restaurantId = (eventRestaurantId ?? payload.restaurantId) as string;
+    const customerId = payload.customerId as string;
+
+    if (!restaurantId || !customerId) {
+      log.warn({ restaurantId, customerId }, 'payment.succeeded missing restaurantId or customerId — skipping');
+      return;
+    }
+
+    // Upsert contact — fixes bug where getByCustomerId() returns null for first-time customers
+    const contact = await this.contactService.upsertFromEvent(restaurantId, {
+      customerId,
+      name: payload.customerName as string | undefined,
+      email: payload.customerEmail as string | undefined,
+    });
+
+    const triggerContext = {
+      orderId: payload.orderId as string | undefined,
+      orderNumber: payload.orderNumber as string | undefined,
+      customerId,
+      customerEmail: payload.customerEmail as string | undefined,
+      customerName: payload.customerName as string | undefined,
+      customerPhone: payload.customerPhone as string | undefined,
+      orderType: payload.orderType as string | undefined,
+      orderTotal: (payload.orderTotal as number) ?? 0,
+      paymentStatus: payload.paymentStatus as string | undefined,
+      paymentMethod: payload.paymentMethod as string | undefined,
+    };
+
+    // Evaluate new_order triggers
+    await this.triggerService.evaluateTriggers(restaurantId, 'new_order', contact._id.toString(), triggerContext);
+
+    // Backward compatibility: also evaluate payment_succeeded triggers
+    await this.triggerService.evaluateTriggers(restaurantId, 'payment_succeeded', contact._id.toString(), triggerContext);
   }
 
   /**

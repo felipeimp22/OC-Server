@@ -102,8 +102,8 @@ export class TriggerService {
       return { flowId, flowName: flow.name, enrolled: false, reason: 'Trigger conditions not met' };
     }
 
-    // Order-level dedup: for order_completed, check if this order was already processed for this flow
-    if (eventType === 'order_completed' && payload.orderId) {
+    // Order-level dedup: for order_completed and new_order, check if this order was already processed for this flow
+    if ((eventType === 'order_completed' || eventType === 'new_order') && payload.orderId) {
       const alreadyProcessed = await this.executionRepo.hasOrderBeenProcessedForFlow(
         restaurantId,
         flowId,
