@@ -227,6 +227,11 @@ export class OrderEventConsumer {
       });
     }
 
+    // Item-ordered trigger: fires on the same order.completed event path when order contains configured menu items
+    if (items.length > 0) {
+      await this.triggerService.evaluateTriggers(restaurantId, 'item_ordered', contact._id.toString(), triggerContext);
+    }
+
     // Cancel pending abandoned cart jobs for this order
     if (orderId) {
       await this.cancelAbandonedCartJobs(restaurantId, orderId);

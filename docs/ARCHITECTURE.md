@@ -381,6 +381,35 @@ processOrderAsCompleted()
 - Only `processOrderAsCompleted()` increments `totalOrders` (not `handleNewOrder`) — so only paid/fulfilled orders count
 - The `first_order` trigger uses a separate `totalOrders === 1` check in `processOrderAsCompleted()` and does NOT go through `checkTriggerConditions`
 
+## item_ordered Trigger — Item Matching Logic
+
+The `item_ordered` trigger fires when an order contains specific menu items (with optional modifier matching). It evaluates in `processOrderAsCompleted()` alongside `order_completed`, `first_order`, and `nth_order`.
+
+```
+processOrderAsCompleted()
+  1. Fetch order items from DB (Order.findById) → payload.items[]
+  2. evaluateTriggers('item_ordered', ..., { items, ... })
+  3. TriggerService.checkTriggerConditions() → match config.items against payload.items
+```
+
+### Matching Algorithm
+
+1. **Config shape**: `config.items[]` — each has `{ menuItemId, menuItemName, modifiers?: [{ optionName, choiceNames }] }`
+2. **Payload shape**: `payload.items[]` — each has `{ menuItemId, name, options: [{ name, choice }] }`
+3. **Item match**: `String(orderItem.menuItemId) === String(configItem.menuItemId)`
+4. **Modifier match** (if config item has modifiers): ALL specified modifiers must match — for each modifier, the order item's `options[]` must contain an entry where `option.name === modifier.optionName` AND `option.choice` is in `modifier.choiceNames`
+5. **No modifiers**: If config item has no modifiers, menuItemId match alone is sufficient (any modifier combination accepted)
+6. **Match mode**: `'any'` (default) = at least one config item matches; `'all'` = every config item must match
+7. **Edge cases**: Empty `config.items` or empty `payload.items` → false (no match)
+
+### Order-Level Dedup
+
+The `item_ordered` trigger uses the same `hasOrderBeenProcessedForFlow` dedup as `order_completed` and `new_order` — one fire per order per flow.
+
+### Guard: Items Must Exist
+
+`evaluateTriggers('item_ordered', ...)` is only called when `items.length > 0` (i.e., order items were successfully fetched from DB). If the DB fetch fails, the trigger is skipped for that order.
+
 ## Time-Based Trigger Architecture
 
 The CRM engine uses three distinct time-based mechanisms. Understanding which mechanism applies where is critical to avoid confusion.

@@ -102,8 +102,8 @@ export class TriggerService {
       return { flowId, flowName: flow.name, enrolled: false, reason: 'Trigger conditions not met' };
     }
 
-    // Order-level dedup: for order_completed and new_order, check if this order was already processed for this flow
-    if ((eventType === 'order_completed' || eventType === 'new_order') && payload.orderId) {
+    // Order-level dedup: for order-based triggers, check if this order was already processed for this flow
+    if ((eventType === 'order_completed' || eventType === 'new_order' || eventType === 'item_ordered') && payload.orderId) {
       const alreadyProcessed = await this.executionRepo.hasOrderBeenProcessedForFlow(
         restaurantId,
         flowId,
@@ -205,6 +205,52 @@ export class TriggerService {
       const totalOrders = payload.totalOrders as number | undefined;
       if (n == null || totalOrders == null || totalOrders !== n) {
         log.info({ n, totalOrders, reason: 'nth_order threshold not met (requires exact match)' }, 'nth_order check failed');
+        return false;
+      }
+    }
+
+    // item_ordered: match order items against configured menu items with optional modifier filtering.
+    // Uses payload.items (fetched from DB in OrderEventConsumer.processOrderAsCompleted()).
+    if (triggerNode.subType === 'item_ordered') {
+      const configItems = config.items as Array<{ menuItemId: string; menuItemName: string; modifiers?: Array<{ optionName: string; choiceNames: string[] }> }> | undefined;
+      const matchMode = (config.matchMode as string) ?? 'any';
+      const orderItems = payload.items as Array<{ menuItemId: string; name: string; options?: Array<{ name: string; choice: string }> }> | undefined;
+
+      if (!configItems || configItems.length === 0 || !orderItems || orderItems.length === 0) {
+        log.info({ reason: 'item_ordered: empty config.items or payload.items' }, 'item_ordered check failed');
+        return false;
+      }
+
+      const itemMatches = configItems.map((configItem) => {
+        // Find order item with matching menuItemId (string comparison)
+        const matchingOrderItem = orderItems.find(
+          (oi) => String(oi.menuItemId) === String(configItem.menuItemId),
+        );
+        if (!matchingOrderItem) return false;
+
+        // If config has modifiers, ALL specified modifiers must match
+        if (configItem.modifiers && configItem.modifiers.length > 0) {
+          const orderOptions = matchingOrderItem.options ?? [];
+          return configItem.modifiers.every((modifier) => {
+            // Find an order option matching the modifier's option name
+            return orderOptions.some(
+              (opt) =>
+                opt.name === modifier.optionName &&
+                modifier.choiceNames.includes(opt.choice),
+            );
+          });
+        }
+
+        // No modifiers specified — menuItemId match is sufficient
+        return true;
+      });
+
+      const passes = matchMode === 'all'
+        ? itemMatches.every(Boolean)
+        : itemMatches.some(Boolean);
+
+      if (!passes) {
+        log.info({ matchMode, itemMatches, reason: 'item_ordered: item match failed' }, 'item_ordered check failed');
         return false;
       }
     }
