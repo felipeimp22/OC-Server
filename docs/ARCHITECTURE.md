@@ -410,6 +410,44 @@ The `item_ordered` trigger uses the same `hasOrderBeenProcessedForFlow` dedup as
 
 `evaluateTriggers('item_ordered', ...)` is only called when `items.length > 0` (i.e., order items were successfully fetched from DB). If the DB fetch fails, the trigger is skipped for that order.
 
+## item_ordered_x_times Trigger — Cumulative Counting
+
+The `item_ordered_x_times` trigger fires when a customer has ordered a specific menu item a cumulative number of times across their lifetime (paid orders only), hitting the threshold exactly on this order. It evaluates in `processOrderAsCompleted()` alongside `item_ordered`.
+
+```
+processOrderAsCompleted()
+  1. Fetch order items from DB (Order.findById) → payload.items[]
+  2. evaluateTriggers('item_ordered_x_times', ..., { items, restaurantId, ... })
+  3. TriggerService.checkTriggerConditions():
+     a. Early return: check current order contains matching config items (same logic as item_ordered)
+     b. For each matching item: countItemOrdersByCustomer() → lifetime count
+     c. Fire only when count === threshold (exact equality)
+```
+
+### Counting Method: `countItemOrdersByCustomer()`
+
+MongoDB aggregation pipeline:
+1. `$match`: restaurantId + customerId + paymentStatus='paid'
+2. `$unwind`: '$items'
+3. `$match`: 'items.menuItemId' = target menuItemId (ObjectId)
+4. If modifiers specified: `$match` with `$elemMatch` on 'items.options' for each modifier (name + choice)
+5. `$count`: 'total'
+
+**Performance**: Leverages index on `(restaurantId, customerId, paymentStatus)`. Query runs once per matching config item per order completion per active `item_ordered_x_times` flow. Acceptable for MVP.
+
+### Exact Threshold (`===`)
+
+The `=== threshold` check is critical: using `>=` would fire on every order after the threshold. The `===` ensures the trigger fires exactly once per customer per threshold value, without needing additional dedup beyond the existing `hasOrderBeenProcessedForFlow`.
+
+### Match Mode
+
+- `'any'` (default): fire if ANY configured item reaches the threshold count
+- `'all'`: fire only if ALL configured items have each reached the threshold count
+
+### Dedup
+
+Uses the same `hasOrderBeenProcessedForFlow` order-level dedup as `order_completed`, `new_order`, and `item_ordered` — one fire per order per flow.
+
 ## Time-Based Trigger Architecture
 
 The CRM engine uses three distinct time-based mechanisms. Understanding which mechanism applies where is critical to avoid confusion.

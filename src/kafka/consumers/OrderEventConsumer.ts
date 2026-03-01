@@ -230,6 +230,13 @@ export class OrderEventConsumer {
     // Item-ordered trigger: fires on the same order.completed event path when order contains configured menu items
     if (items.length > 0) {
       await this.triggerService.evaluateTriggers(restaurantId, 'item_ordered', contact._id.toString(), triggerContext);
+
+      // Item-ordered X times: cumulative counting trigger — fires exactly at threshold.
+      // Shares same item context; TriggerService checks lifetime count via DB aggregation.
+      await this.triggerService.evaluateTriggers(restaurantId, 'item_ordered_x_times', contact._id.toString(), {
+        ...triggerContext,
+        restaurantId,
+      });
     }
 
     // Cancel pending abandoned cart jobs for this order
