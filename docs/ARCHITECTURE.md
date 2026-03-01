@@ -191,6 +191,73 @@ Each node can have multiple outgoing edges. The engine:
 2. For conditions, uses `sourceHandle` to pick the correct branch (e.g., "yes"/"no")
 3. For regular nodes, follows all outgoing edges (parallel execution)
 
+### Fan-Out Execution Model
+
+When a node has multiple outgoing edges, the engine dispatches each downstream node as a separate Kafka `flow.step.ready` event, enabling parallel branch execution within a single FlowExecution.
+
+#### Tracking Fields (`crm_flow_executions`)
+
+| Field | Type | Purpose |
+|-------|------|---------|
+| `currentNodeId` | `string` | Backward-compat: set to the first downstream target on advance |
+| `pendingNodes` | `string[]` | Node IDs currently being processed or dispatched (default `[]`) |
+| `completedNodes` | `string[]` | Node IDs that finished successfully (default `[]`) |
+| `erroredNodes` | `string[]` | Node IDs that failed (default `[]`) |
+
+#### Lifecycle
+
+```
+enrollContact()
+  → create execution with pendingNodes=[triggerNodeId]
+  → processCurrentNode(executionId)
+
+processCurrentNode(executionId, nodeId)
+  → process the node (action/condition/trigger)
+  → advanceToNext(): filter ALL outgoing edges
+      → $addToSet downstream nodeIds to pendingNodes
+      → produce flow.step.ready Kafka event per target
+  → $pull nodeId from pendingNodes, $addToSet to completedNodes
+  → if pendingNodes is empty → determine final status
+```
+
+#### Error Isolation
+
+Each node processes inside a try-catch. On failure:
+- The failed node is moved from `pendingNodes` to `erroredNodes` ($pull/$addToSet atomic)
+- **Sibling branches continue unaffected** — they have their own pending entries
+- Final status: if `pendingNodes` empties with only `erroredNodes` (no `completedNodes`), execution is marked `error`. Otherwise, execution is marked `completed` (partial errors are tolerated).
+
+#### Concurrency Safety
+
+Multiple `flow.step.ready` Kafka events for the same execution may be processed concurrently (e.g., 3 action nodes in a fan-out). Thread-safety is ensured by:
+- **Atomic MongoDB operations**: `findOneAndUpdate` with `$pull`/`$addToSet` on `pendingNodes` — each returns the document *after* the update
+- **No shared mutable state**: each concurrent call processes a different `nodeId`
+- **Deterministic completion**: the last concurrent call to empty `pendingNodes` triggers the completion check
+
+#### Fan-Out Example
+
+```
+[Trigger] → [Email₁] + [Email₂] + [SMS₁]   (3 outgoing edges)
+
+1. Trigger processes → advanceToNext adds [email₁, email₂, sms₁] to pendingNodes
+2. 3 Kafka events dispatched, processed concurrently:
+   - email₁ completes → pendingNodes=[email₂, sms₁] → not empty
+   - email₂ completes → pendingNodes=[sms₁] → not empty
+   - sms₁ completes → pendingNodes=[] → COMPLETE
+```
+
+#### Action Chaining Example
+
+```
+[Trigger] → [Email] → [Timer: 2h] → [SMS]
+
+1. Trigger → advanceToNext → pendingNodes=[email]
+2. Email processes → advanceToNext → pendingNodes=[email, timer] → completeNode(email) → pendingNodes=[timer]
+3. Timer schedules BullMQ job → pauses (stays in pendingNodes)
+4. Timer fires → FlowTimerProcessor → advanceToNext → pendingNodes=[timer, sms] → completeNode(timer) → pendingNodes=[sms]
+5. SMS processes → no outgoing edges → completeNode(sms) → pendingNodes=[] → COMPLETE
+```
+
 ## Kafka Topics
 
 All topic names are defined in `src/kafka/topics.ts` (`KAFKA_TOPICS`):

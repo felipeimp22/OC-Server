@@ -74,7 +74,7 @@ export class FlowTimerProcessor {
       return;
     }
 
-    // Load flow to find the next node after the timer
+    // Load flow to find the next node(s) after the timer
     const flow = await this.flowRepo.findById(
       execution.restaurantId.toString(),
       execution.flowId.toString(),
@@ -84,21 +84,35 @@ export class FlowTimerProcessor {
       return;
     }
 
-    // Find the outgoing edge from the timer node
-    const edge = flow.edges.find((e) => e.sourceNodeId === nodeId);
-    if (!edge) {
-      // No outgoing edge — timer was the last node
-      await this.executionRepo.markCompleted(executionId);
-      await this.flowRepo.recordCompletion(execution.flowId.toString());
-      log.info({ executionId }, 'No outgoing edge from timer — execution completed');
+    // Find ALL outgoing edges from the timer node (fan-out support)
+    const edges = flow.edges.filter((e) => e.sourceNodeId === nodeId);
+
+    if (edges.length === 0) {
+      // No outgoing edges — timer was a leaf node
+      // Move timer from pendingNodes to completedNodes, then check completion
+      const updated = await this.executionRepo.completeNode(executionId, nodeId);
+      if (updated && updated.pendingNodes.length === 0) {
+        await this.executionRepo.markCompleted(executionId);
+        await this.flowRepo.recordCompletion(execution.flowId.toString());
+      }
+      log.info({ executionId }, 'No outgoing edge from timer — branch complete');
       return;
     }
 
-    // Advance to the next node
-    await this.executionRepo.advanceToNode(executionId, edge.targetNodeId);
+    // Add all target nodeIds to pendingNodes before producing events
+    const targetNodeIds = edges.map((e) => e.targetNodeId);
+    await this.executionRepo.addToPendingNodes(executionId, targetNodeIds);
 
-    // Produce flow.step.ready event
-    await produceFlowStepReady(executionId, edge.targetNodeId);
+    // Move timer node from pendingNodes to completedNodes
+    await this.executionRepo.completeNode(executionId, nodeId);
+
+    // Update currentNodeId for backward compat
+    await this.executionRepo.advanceToNode(executionId, targetNodeIds[0]);
+
+    // Produce flow.step.ready event for each target node
+    for (const edge of edges) {
+      await produceFlowStepReady(executionId, edge.targetNodeId);
+    }
   }
 
   async stop(): Promise<void> {

@@ -187,6 +187,59 @@ export class FlowExecutionRepository extends BaseRepository<IFlowExecutionDocume
   }
 
   /**
+   * Atomically add node IDs to pendingNodes (fan-out: dispatching downstream branches).
+   * Uses $addToSet to prevent duplicates.
+   */
+  async addToPendingNodes(
+    id: Types.ObjectId | string,
+    nodeIds: string[],
+  ): Promise<IFlowExecutionDocument | null> {
+    return this.model.findByIdAndUpdate(
+      id,
+      { $addToSet: { pendingNodes: { $each: nodeIds } } },
+      { new: true },
+    ).exec();
+  }
+
+  /**
+   * Atomically move a node from pendingNodes to completedNodes.
+   * Used after a node finishes processing successfully.
+   * Returns the updated document so the caller can check if pendingNodes is empty.
+   */
+  async completeNode(
+    id: Types.ObjectId | string,
+    nodeId: string,
+  ): Promise<IFlowExecutionDocument | null> {
+    return this.model.findByIdAndUpdate(
+      id,
+      {
+        $pull: { pendingNodes: nodeId },
+        $addToSet: { completedNodes: nodeId },
+      },
+      { new: true },
+    ).exec();
+  }
+
+  /**
+   * Atomically move a node from pendingNodes to erroredNodes.
+   * Used when a node fails — sibling branches continue unaffected.
+   * Returns the updated document so the caller can check if pendingNodes is empty.
+   */
+  async errorNode(
+    id: Types.ObjectId | string,
+    nodeId: string,
+  ): Promise<IFlowExecutionDocument | null> {
+    return this.model.findByIdAndUpdate(
+      id,
+      {
+        $pull: { pendingNodes: nodeId },
+        $addToSet: { erroredNodes: nodeId },
+      },
+      { new: true },
+    ).exec();
+  }
+
+  /**
    * Count active executions per flow (for flow stats).
    */
   async countActiveByFlow(

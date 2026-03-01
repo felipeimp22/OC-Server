@@ -29,8 +29,7 @@ import type { IFlowDocument, IFlowNode, IFlowEdge } from '../domain/models/crm/F
 import type { IFlowExecutionDocument } from '../domain/models/crm/FlowExecution.js';
 import type { IFlowExecutionLogDocument } from '../domain/models/crm/FlowExecutionLog.js';
 import type { IContactDocument } from '../domain/models/crm/Contact.js';
-import { getProducer } from '../config/kafka.js';
-import { KAFKA_TOPICS } from '../kafka/topics.js';
+import { produceFlowStepReady } from '../kafka/producers/FlowEventProducer.js';
 import { createLogger } from '../config/logger.js';
 
 const log = createLogger('FlowEngineService');
@@ -93,13 +92,14 @@ export class FlowEngineService {
       return;
     }
 
-    // Create execution record
+    // Create execution record (pendingNodes starts with trigger for fan-out tracking)
     const execution = await this.executionRepo.create({
       flowId,
       restaurantId,
       contactId,
       status: 'active',
       currentNodeId: triggerNode.id,
+      pendingNodes: [triggerNode.id],
       context,
     } as any);
 
@@ -113,13 +113,19 @@ export class FlowEngineService {
   }
 
   /**
-   * Process the current node for a flow execution.
+   * Process a specific node for a flow execution.
    * This is the main entry point called by Kafka consumers when
    * a `flow.step.ready` event is received.
    *
+   * For fan-out: multiple concurrent calls may process different nodes
+   * of the same execution in parallel. Each call uses the nodeId from
+   * the Kafka event (not execution.currentNodeId) to determine which
+   * node to process.
+   *
    * @param executionId - The flow execution ID
+   * @param nodeId - The specific node to process (from Kafka event). Falls back to execution.currentNodeId for backward compat.
    */
-  async processCurrentNode(executionId: string): Promise<void> {
+  async processCurrentNode(executionId: string, nodeId?: string): Promise<void> {
     // 1. Load execution (tenant-free lookup — executionId is the primary key here)
     const execution = await this.executionRepo.findByExecutionId(executionId);
     if (!execution) {
@@ -132,8 +138,10 @@ export class FlowEngineService {
       return;
     }
 
-    if (!execution.currentNodeId) {
-      log.warn({ executionId }, 'No current node — marking complete');
+    // Use provided nodeId (from Kafka event) or fall back to currentNodeId (backward compat)
+    const targetNodeId = nodeId || execution.currentNodeId;
+    if (!targetNodeId) {
+      log.warn({ executionId }, 'No target node — marking complete');
       await this.completeExecution(execution);
       return;
     }
@@ -157,29 +165,43 @@ export class FlowEngineService {
       return;
     }
 
-    // 4. Get current node
-    const currentNode = flow.nodes.find((n) => n.id === execution.currentNodeId);
+    // 4. Get target node
+    const currentNode = flow.nodes.find((n) => n.id === targetNodeId);
     if (!currentNode) {
-      log.error({ executionId, nodeId: execution.currentNodeId }, 'Node not found in flow');
-      await this.errorExecution(execution, `Node ${execution.currentNodeId} not found`);
+      log.error({ executionId, nodeId: targetNodeId }, 'Node not found in flow');
+      // Error isolation: move this node from pendingNodes to erroredNodes
+      const updated = await this.executionRepo.errorNode(executionId, targetNodeId);
+      await this.checkExecutionCompletion(updated, execution);
       return;
     }
 
     // 5. Enrich context with restaurant data
     const enrichedContext = await this.enrichContext(execution);
 
-    // 6. Process the node
+    // 6. Process the node with error isolation
     try {
-      await this.processNode(execution, flow, contact, currentNode, enrichedContext);
+      const { paused } = await this.processNode(execution, flow, contact, currentNode, enrichedContext);
+
+      // If node paused (timer), don't track completion — timer processor handles it
+      if (!paused) {
+        // Move node from pendingNodes to completedNodes
+        const updated = await this.executionRepo.completeNode(executionId, targetNodeId);
+        await this.checkExecutionCompletion(updated, execution);
+      }
     } catch (err) {
       log.error({ err, executionId, nodeId: currentNode.id }, 'Error processing node');
       await this.logNodeExecution(execution, currentNode, 'failure', `Error: ${(err as Error).message}`);
-      await this.errorExecution(execution, (err as Error).message);
+
+      // Error isolation: move from pendingNodes to erroredNodes (sibling branches continue)
+      const updated = await this.executionRepo.errorNode(executionId, targetNodeId);
+      await this.checkExecutionCompletion(updated, execution);
     }
   }
 
   /**
    * Process a single node.
+   * Returns { paused: true } if execution is paused (timer nodes).
+   * For non-paused nodes, the caller handles pendingNodes tracking.
    */
   private async processNode(
     execution: IFlowExecutionDocument,
@@ -187,7 +209,7 @@ export class FlowEngineService {
     contact: IContactDocument,
     node: IFlowNode,
     context: Record<string, unknown>,
-  ): Promise<void> {
+  ): Promise<{ paused: boolean }> {
     const restaurantId = execution.restaurantId.toString();
     const executionId = execution._id.toString();
     const flowId = flow._id.toString();
@@ -199,7 +221,7 @@ export class FlowEngineService {
         // Trigger nodes just advance to the next node (already logged on enrollment)
         await this.logNodeExecution(execution, node, 'success', 'Trigger processed');
         await this.advanceToNext(execution, flow, node, null);
-        break;
+        return { paused: false };
       }
 
       case 'action': {
@@ -212,9 +234,9 @@ export class FlowEngineService {
           `Action ${node.subType}: ${result.success ? 'completed' : result.error}`,
           result.metadata,
         );
-        // Continue even if action fails (log the failure, don't stop the flow)
+        // Continue to downstream nodes (action chaining / fan-out)
         await this.advanceToNext(execution, flow, node, null);
-        break;
+        return { paused: false };
       }
 
       case 'condition': {
@@ -228,7 +250,7 @@ export class FlowEngineService {
           { handle: conditionResult.handle },
         );
         await this.advanceToNext(execution, flow, node, conditionResult.handle);
-        break;
+        return { paused: false };
       }
 
       case 'timer': {
@@ -243,31 +265,36 @@ export class FlowEngineService {
             `Timer scheduled for ${targetDate.toISOString()}`,
             { targetDate: targetDate.toISOString() },
           );
-          // STOP processing — timer will resume via BullMQ
+          // STOP processing — timer will resume via BullMQ FlowTimerProcessor
+          // Timer node stays in pendingNodes until the timer fires
           log.info({ executionId, targetDate }, 'Execution paused for timer');
+          return { paused: true };
         } else {
           await this.logNodeExecution(execution, node, 'skipped', 'Timer could not be scheduled');
           await this.advanceToNext(execution, flow, node, null);
+          return { paused: false };
         }
-        break;
       }
 
       case 'logic': {
         log.error({ executionId, nodeId: node.id }, 'Legacy logic node encountered — completing execution');
         await this.logNodeExecution(execution, node, 'skipped', 'Legacy logic node type not supported');
         await this.completeExecution(execution);
-        break;
+        return { paused: true }; // Handled directly — don't track in pendingNodes
       }
 
       default:
         log.warn({ nodeType: node.type }, 'Unknown node type');
         await this.logNodeExecution(execution, node, 'skipped', `Unknown node type: ${node.type}`);
         await this.advanceToNext(execution, flow, node, null);
+        return { paused: false };
     }
   }
 
   /**
-   * Advance to the next node following the edge from the current node.
+   * Advance to the next node(s) following edges from the current node.
+   * Supports fan-out: if multiple outgoing edges exist, dispatches a
+   * separate Kafka event for each target node (parallel execution).
    */
   private async advanceToNext(
     execution: IFlowExecutionDocument,
@@ -275,52 +302,44 @@ export class FlowEngineService {
     currentNode: IFlowNode,
     handle: string | null,
   ): Promise<void> {
-    // Find outgoing edge matching the handle
-    let edge: IFlowEdge | undefined;
+    const executionId = execution._id.toString();
+
+    // Find ALL outgoing edges (fan-out support)
+    let edges: IFlowEdge[];
     if (handle) {
-      edge = flow.edges.find(
+      // Condition nodes: follow only the branch matching the handle
+      edges = flow.edges.filter(
         (e) => e.sourceNodeId === currentNode.id && e.sourceHandle === handle,
       );
-    }
-    // Fallback: find any outgoing edge from this node
-    if (!edge) {
-      edge = flow.edges.find((e) => e.sourceNodeId === currentNode.id);
+    } else {
+      // Non-condition nodes: follow ALL outgoing edges
+      edges = flow.edges.filter((e) => e.sourceNodeId === currentNode.id);
     }
 
-    if (!edge) {
-      // No outgoing edge — flow is complete
-      log.info({ executionId: execution._id, nodeId: currentNode.id }, 'No outgoing edge — completing');
-      await this.completeExecution(execution);
+    if (edges.length === 0) {
+      // No outgoing edges — this branch is a leaf node
+      // Completion is determined by the caller via pendingNodes check
+      log.info({ executionId, nodeId: currentNode.id }, 'No outgoing edges — branch complete');
       return;
     }
 
-    const nextNodeId = edge.targetNodeId;
+    const targetNodeIds = edges.map((e) => e.targetNodeId);
 
-    // Update execution record
-    await this.executionRepo.advanceToNode(execution._id.toString(), nextNodeId);
+    // Add all target nodeIds to pendingNodes atomically (before producing events)
+    await this.executionRepo.addToPendingNodes(executionId, targetNodeIds);
 
-    // Produce flow.step.ready event to Kafka for async processing
-    try {
-      const producer = getProducer();
-      await producer.send({
-        topic: KAFKA_TOPICS.CRM_FLOW_EXECUTE,
-        messages: [
-          {
-            key: execution._id.toString(),
-            value: JSON.stringify({
-              eventType: 'flow.step.ready',
-              executionId: execution._id.toString(),
-              nextNodeId,
-              timestamp: new Date().toISOString(),
-            }),
-          },
-        ],
-      });
-    } catch (err) {
-      log.error({ err, executionId: execution._id }, 'Failed to produce flow.step.ready — processing synchronously');
-      // Fallback: process synchronously (less ideal but keeps flow moving)
-      execution.currentNodeId = nextNodeId;
-      await this.processCurrentNode(execution._id.toString());
+    // Update currentNodeId for backward compat (first target)
+    await this.executionRepo.advanceToNode(executionId, targetNodeIds[0]);
+
+    // Produce a flow.step.ready event for each target node
+    for (const edge of edges) {
+      try {
+        await produceFlowStepReady(executionId, edge.targetNodeId);
+      } catch (err) {
+        log.error({ err, executionId, targetNodeId: edge.targetNodeId }, 'Failed to produce flow.step.ready — processing synchronously');
+        // Fallback: process synchronously
+        await this.processCurrentNode(executionId, edge.targetNodeId);
+      }
     }
   }
 
@@ -331,6 +350,29 @@ export class FlowEngineService {
     await this.executionRepo.markCompleted(execution._id.toString());
     await this.flowRepo.recordCompletion(execution.flowId.toString());
     log.info({ executionId: execution._id, flowId: execution.flowId }, 'Execution completed');
+  }
+
+  /**
+   * Check if execution is fully complete after a node finishes.
+   * Called after atomically moving a node from pendingNodes to completedNodes/erroredNodes.
+   * If pendingNodes is empty, all branches have resolved — determine final status.
+   */
+  private async checkExecutionCompletion(
+    updated: IFlowExecutionDocument | null,
+    execution: IFlowExecutionDocument,
+  ): Promise<void> {
+    if (!updated) return;
+
+    if (updated.pendingNodes.length === 0) {
+      // All branches have resolved
+      if (updated.erroredNodes.length > 0 && updated.completedNodes.length === 0) {
+        // All branches errored — mark execution as error
+        await this.errorExecution(execution, 'All branches errored');
+      } else {
+        // At least some branches completed (may have partial errors) — mark as completed
+        await this.completeExecution(execution);
+      }
+    }
   }
 
   /**
