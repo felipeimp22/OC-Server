@@ -197,6 +197,18 @@ export class TriggerService {
       }
     }
 
+    // Check targetStatus filter (order_status_changed trigger — fire only for configured status)
+    if (config.targetStatus && typeof config.targetStatus === 'string' && config.targetStatus !== '') {
+      const actualStatus = (payload.newStatus ?? (payload as any).status) as string | undefined;
+      if (actualStatus && config.targetStatus !== actualStatus) {
+        log.info(
+          { configuredStatus: config.targetStatus, actualStatus, reason: 'targetStatus mismatch' },
+          'targetStatus mismatch',
+        );
+        return false;
+      }
+    }
+
     log.info('All trigger conditions passed');
     return true;
   }

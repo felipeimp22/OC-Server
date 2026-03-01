@@ -215,7 +215,7 @@ Email/SMS inline composers use `{{dot.notation}}` variables scoped to the trigge
 |---------|---------------------|
 | `order_completed` (fires once on first qualifying fulfillment status: ready, out_for_delivery, delivered, completed), `first_order`, `nth_order` | `{{order.total}}`, `{{order.number}}`, `{{order.items_summary}}`, `{{order.date}}` |
 | `payment_failed` | `{{order.total}}`, `{{order.number}}`, `{{payment.failure_reason}}` |
-| `order_status_changed` | `{{order.number}}`, `{{order.status}}` |
+| `order_status_changed` (supports `config.targetStatus` filter — if set, fires only when `newStatus` matches; if empty/unset, fires on every status change) | `{{order.number}}`, `{{order.status}}` |
 | `abandoned_cart` | `{{cart.items_summary}}`, `{{cart.total}}`, `{{cart.abandon_time}}` |
 | `no_order_in_x_days` | `{{customer.last_order_date}}`, `{{customer.days_since_order}}` |
 
