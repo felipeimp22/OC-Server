@@ -64,11 +64,10 @@ export class ReviewRequestScheduler {
 
         // Load restaurant for context
         const restaurant = await Restaurant.findById(restaurantId).lean().exec();
-        const context = buildContext(
+        const context = await buildContext(
           contact.toObject ? contact.toObject() : contact,
-          (restaurant ?? {}) as Record<string, unknown>,
-          null,
           { review_link: request.reviewUrl },
+          (restaurant ?? {}) as Record<string, unknown>,
         );
 
         if (request.channel === 'sms' && contact.phone) {

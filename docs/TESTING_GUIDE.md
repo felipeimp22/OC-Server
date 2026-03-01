@@ -1134,6 +1134,73 @@ db.crm_flow_executions.aggregate([
 
 ---
 
+### 10.6 Template Variable Interpolation
+
+This section covers verifying that template variables resolve correctly in CRM email/SMS actions, including the three variables that required special resolution logic.
+
+#### Test A: `customer.last_name` — name splitting fallback
+
+Create a flow with a send_email action using `{{customer.first_name}} {{customer.last_name}}` in the body. Send a Kafka event where:
+- The contact has no `lastName` stored (or is a first-time customer)
+- The Kafka payload includes `"customerName": "John Smith Jr"`
+
+**Expected result**: The email body resolves to `"John Smith Jr"` — first token becomes `first_name`, remaining tokens joined as `last_name`.
+
+**Verify in communication logs:**
+```javascript
+db.crm_communication_logs.find({
+  restaurantId: ObjectId("YOUR_RESTAURANT_ID")
+}).sort({ sentAt: -1 }).limit(1).pretty()
+// Check the interpolated subject/body fields contain the correct name
+```
+
+#### Test B: `customer.phone` — plain string from Kafka
+
+Send an order.completed Kafka event with `"customerPhone": "+1 7787915942"` (flat string, not an object).
+
+**Expected result**: `{{customer.phone}}` resolves to `"+1 7787915942"` even if the contact's phone field is empty or stored as an object.
+
+**Note**: The phone resolution order is: `contact.phone` (object format) → `contact.phone` (string format) → `payload.customerPhone` (string fallback from Kafka).
+
+#### Test C: `order.items_summary` — DB lookup fallback
+
+1. Create an order in the `orders` collection with items:
+   ```javascript
+   db.orders.insertOne({
+     restaurantId: ObjectId("YOUR_RESTAURANT_ID"),
+     orderNumber: "ORD-ITEMS-TEST",
+     customerId: ObjectId("YOUR_CUSTOMER_ID"),
+     customerName: "Test User",
+     customerEmail: "test@example.com",
+     customerPhone: "+15551234567",
+     items: [
+       { name: "Margherita Pizza", quantity: 2, price: 15.99, options: [] },
+       { name: "Caesar Salad", quantity: 1, price: 9.99, options: [] }
+     ],
+     orderType: "delivery",
+     status: "completed",
+     paymentStatus: "paid",
+     paymentMethod: "card",
+     subtotal: 41.97, tax: 3.36, tip: 5, driverTip: 0, deliveryFee: 3.99, platformFee: 0, processingFee: 0, total: 54.32,
+   })
+   ```
+
+2. Send a Kafka event for this order **without** `items` in the payload (this is the normal case — Kafka events don't include items).
+
+3. The flow's send_email action should use `{{order.items_summary}}` in the body.
+
+**Expected result**: `buildContext()` detects missing items, performs `Order.findById(orderId)`, and resolves `items_summary` to `"2x Margherita Pizza, 1x Caesar Salad"`.
+
+**Verify:**
+```javascript
+db.crm_communication_logs.find({
+  restaurantId: ObjectId("YOUR_RESTAURANT_ID")
+}).sort({ sentAt: -1 }).limit(1).pretty()
+// The interpolated body should contain the items summary from the DB lookup
+```
+
+---
+
 ## 11. Troubleshooting
 
 ### Common Issues

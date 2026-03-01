@@ -67,12 +67,10 @@ export class ActionService {
   ): Promise<ActionResult> {
     try {
       const restaurantData = (executionContext._restaurant ?? {}) as Record<string, unknown>;
-      const orderData = (executionContext._order ?? null) as Record<string, unknown> | null;
-      const context = buildContext(
+      const context = await buildContext(
         contact.toObject ? contact.toObject() : contact,
-        restaurantData,
-        orderData,
         executionContext as Record<string, unknown>,
+        restaurantData,
       );
 
       switch (node.subType) {

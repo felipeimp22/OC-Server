@@ -199,15 +199,15 @@ All 8 topics are auto-created by `ensureTopics()` on startup (`ENABLE_KAFKA=true
 Email/SMS inline composers use `{{dot.notation}}` variables scoped to the trigger type. All triggers include universal variables:
 
 ### Universal Variables (all triggers)
-| Variable | Description |
-|----------|-------------|
-| `{{customer.first_name}}` | Contact's first name |
-| `{{customer.last_name}}` | Contact's last name |
-| `{{customer.email}}` | Contact's email |
-| `{{customer.phone}}` | Contact's phone |
-| `{{restaurant.name}}` | Restaurant name |
-| `{{restaurant.owner_name}}` | Restaurant owner's name |
-| `{{restaurant.phone}}` | Restaurant phone |
+| Variable | Description | Resolution |
+|----------|-------------|------------|
+| `{{customer.first_name}}` | Contact's first name | `contact.firstName`; falls back to first token of `payload.customerName` |
+| `{{customer.last_name}}` | Contact's last name | `contact.lastName`; falls back to remaining tokens of `payload.customerName` (e.g. `'John Smith Jr'` → `'Smith Jr'`) |
+| `{{customer.email}}` | Contact's email | `contact.email` |
+| `{{customer.phone}}` | Contact's phone | `contact.phone` (object `{countryCode, number}` or plain string); falls back to `payload.customerPhone` |
+| `{{restaurant.name}}` | Restaurant name | `restaurant.name` |
+| `{{restaurant.owner_name}}` | Restaurant owner's name | `restaurant.ownerName` → `restaurant.name` fallback |
+| `{{restaurant.phone}}` | Restaurant phone | `restaurant.phone` |
 
 ### Trigger-Specific Variables
 
@@ -219,6 +219,13 @@ Email/SMS inline composers use `{{dot.notation}}` variables scoped to the trigge
 | `order_status_changed` (supports `config.targetStatus` filter — if set, fires only when `newStatus` matches; if empty/unset, fires on every status change) | `{{order.number}}`, `{{order.status}}` |
 | `abandoned_cart` | `{{cart.items_summary}}`, `{{cart.total}}`, `{{cart.abandon_time}}` |
 | `no_order_in_x_days` | `{{customer.last_order_date}}`, `{{customer.days_since_order}}` |
+
+#### Variable Resolution Notes
+
+- **`order.items_summary`**: Kafka events do not include order items. When `payload.items` is empty but `payload.orderId` exists, `buildContext()` performs an async DB lookup (`Order.findById(orderId)`) to fetch items and format them as `"2x Burger, 1x Fries"`.
+- **`customer.last_name`**: If `contact.lastName` is empty (e.g., single-word name, or ContactService hasn't split the name yet), `buildContext()` splits `payload.customerName` by whitespace — first token → `first_name`, remaining tokens → `last_name`.
+- **`customer.phone`**: Accepts both `{ countryCode, number }` object (from Contact model) and plain string (from Kafka `customerPhone` field). Falls back to `payload.customerPhone` when contact has no phone.
+- **`buildContext()` is async** — callers must `await` it (ActionService, ReviewRequestScheduler).
 
 Unknown variables are replaced with an empty string.
 
