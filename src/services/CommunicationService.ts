@@ -103,6 +103,7 @@ export class CommunicationService {
 
     // Check email opt-in status
     const contact = await this.contactRepo.findById(params.restaurantId, params.contactId);
+    log.debug({ contactId: params.contactId, emailOptIn: contact?.emailOptIn }, 'Email opt-in check');
     if (contact && contact.emailOptIn === false) {
       log.info({ contactId: params.contactId }, 'Contact opted out — skipping email send');
       return this.commLogRepo.create({
@@ -152,6 +153,8 @@ export class CommunicationService {
       sentAt: new Date(),
     } as any);
 
+    log.debug({ to: toStr, subject, bodyLength: body.length }, 'Sending CRM email');
+
     // Send via provider with retry (max 3 attempts)
     try {
       const provider = getEmailProvider();
@@ -176,10 +179,11 @@ export class CommunicationService {
           $set: { providerMessageId: result.messageId },
         });
       }
-      log.info({ to: toStr, messageId: result.messageId }, 'Email sent');
+      log.info({ contactId: params.contactId, to: toStr, subject }, 'CRM email sent successfully');
     } catch (err) {
+      const errorMessage = (err as Error).message;
       await this.commLogRepo.updateStatus(commLog._id, 'failed');
-      log.error({ err, to: toStr }, 'Email send failed after retries');
+      log.error({ contactId: params.contactId, to: toStr, subject, error: errorMessage }, 'CRM email send failed');
     }
 
     return commLog;

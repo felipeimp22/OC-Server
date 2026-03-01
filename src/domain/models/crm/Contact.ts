@@ -35,12 +35,12 @@ export interface IContactDocument extends Document {
   firstName: string;
   /** Last name (split from Customer.name on sync) */
   lastName: string;
-  /** Whether the contact opted in to receive emails */
-  emailOptIn: boolean;
+  /** Whether the contact opted in to receive emails (null = opted in by default, false = explicit opt-out) */
+  emailOptIn: boolean | null;
   /** Timestamp of email opt-in */
   emailOptInAt: Date | null;
-  /** Whether the contact opted in to receive SMS */
-  smsOptIn: boolean;
+  /** Whether the contact opted in to receive SMS (null = opted in by default, false = explicit opt-out) */
+  smsOptIn: boolean | null;
   /** Timestamp of SMS opt-in */
   smsOptInAt: Date | null;
   /** CRM lifecycle status */
@@ -73,9 +73,9 @@ const ContactSchema = new Schema<IContactDocument>(
     phone: { type: Schema.Types.Mixed, default: null },
     firstName: { type: String, required: true },
     lastName: { type: String, default: '' },
-    emailOptIn: { type: Boolean, default: false },
+    emailOptIn: { type: Boolean, default: null },
     emailOptInAt: { type: Date, default: null },
-    smsOptIn: { type: Boolean, default: false },
+    smsOptIn: { type: Boolean, default: null },
     smsOptInAt: { type: Date, default: null },
     lifecycleStatus: {
       type: String,
