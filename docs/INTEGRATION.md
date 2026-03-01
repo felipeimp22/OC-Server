@@ -232,6 +232,23 @@ Unknown variables are replaced with an empty string.
 
 ---
 
+## Trigger Config Keys
+
+Each trigger node stores its configuration in `node.config`. The backend reads these keys when evaluating triggers.
+
+| Trigger | Config Key | Type | Default | Backend Reader |
+|---------|-----------|------|---------|----------------|
+| `order_completed` | `minOrderTotal` | `number` | — | `TriggerService.checkTriggerConditions()` |
+| `nth_order` | `n` | `number` | 5 | `TriggerService.checkTriggerConditions()` |
+| `no_order_in_x_days` | `days` | `number` | 30 | `InactivityChecker.ts` (line ~72) |
+| `order_status_changed` | `targetStatus` | `string` | — (any) | `TriggerService.checkTriggerConditions()` |
+| `payment_failed` | — | — | — | — |
+| `abandoned_cart` | — | — | — | — |
+| `first_order` | — | — | — | — |
+| `new_order` | — | — | — | — |
+
+---
+
 ## Docker Deployment
 
 ```bash
