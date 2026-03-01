@@ -117,6 +117,21 @@ export class TriggerService {
       }
     }
 
+    // order_status_changed runOnce: optional per-order dedup.
+    // When config.runOnce is true, the flow fires only once per order (permanent dedup via hasOrderBeenProcessedForFlow).
+    // When config.runOnce is false/undefined, fire on every matching status change (existing isContactEnrolled still applies).
+    if (eventType === 'order_status_changed' && triggerNode.config?.runOnce === true && payload.orderId) {
+      const alreadyProcessed = await this.executionRepo.hasOrderBeenProcessedForFlow(
+        restaurantId,
+        flowId,
+        payload.orderId as string,
+      );
+      if (alreadyProcessed) {
+        log.info({ flowId, contactId, orderId: payload.orderId }, 'order_status_changed runOnce: order already processed');
+        return { flowId, flowName: flow.name, enrolled: false, reason: 'order_status_changed runOnce: order already processed' };
+      }
+    }
+
     // Anti-spam: check if already enrolled
     const isEnrolled = await this.executionRepo.isContactEnrolled(restaurantId, flowId, contactId);
     if (isEnrolled) {

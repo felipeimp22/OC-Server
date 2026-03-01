@@ -422,6 +422,48 @@ This ensures existing `order_status_changed` flows with the old single-string co
 | `first_order` | Not used | Same as order_completed |
 | `nth_order` | Not used | Same as order_completed |
 
+## order_status_changed — runOnce Toggle
+
+The `order_status_changed` trigger supports an optional `config.runOnce: boolean` that controls whether the flow fires once per order or on every matching status change.
+
+### Behavior
+
+| `config.runOnce` | Behavior |
+|-------------------|----------|
+| `true` | Flow fires only the **first time** the order matches a selected status. Subsequent status changes for the same order are blocked via `hasOrderBeenProcessedForFlow`. |
+| `false` / `undefined` / not set | Flow fires on **every** matching status change (default — backward compatible). The existing `isContactEnrolled` anti-spam check still applies. |
+
+### Implementation
+
+In `TriggerService.evaluateSingleFlow()`, after the standard order-level dedup block:
+
+```
+if eventType === 'order_status_changed' AND triggerNode.config.runOnce === true AND payload.orderId:
+  → hasOrderBeenProcessedForFlow(restaurantId, flowId, orderId)
+  → if already processed: skip with reason 'order_status_changed runOnce: order already processed'
+```
+
+### Dedup Mechanism
+
+`runOnce` uses the same `hasOrderBeenProcessedForFlow` method as `order_completed` and `new_order` — it queries `crm_flow_executions` for `{ restaurantId, flowId, 'context.orderId': orderId }` with no status filter. This provides permanent per-order dedup (unlike `isContactEnrolled` which only blocks while a flow is actively running).
+
+### Example
+
+```
+Flow: "Order Status Changed" with targetStatuses=['confirmed','ready'] + runOnce=true
+
+order → confirmed: trigger fires → flow enrolled ✓
+order → ready:     trigger fires → hasOrderBeenProcessedForFlow → already enrolled ✗ (runOnce blocks)
+```
+
+Without `runOnce`:
+```
+Flow: "Order Status Changed" with targetStatuses=['confirmed','ready'] + runOnce=false
+
+order → confirmed: trigger fires → flow enrolled ✓ (if not already enrolled via isContactEnrolled)
+order → ready:     trigger fires → flow enrolled ✓ (if previous execution completed)
+```
+
 ## nth_order Trigger — Ordering Dependency
 
 The `nth_order` trigger fires exactly once when a customer's total completed orders reaches the configured threshold (`config.n`). This depends on a critical ordering invariant in `processOrderAsCompleted()`:
