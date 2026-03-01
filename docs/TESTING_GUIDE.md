@@ -1281,6 +1281,35 @@ db.crm_flow_executions.find({
 // Expected: 0 (for abandoned_cart flows)
 ```
 
+#### Test C: Cart abandoned → order completed before delay → job cancelled from queue
+
+This tests the proactive cancellation in `OrderEventConsumer.cancelAbandonedCartJobs()` (as opposed to Test B which tests the processor's defense-in-depth order status check).
+
+1. Send `cart.abandoned` event (same as Test A)
+2. Verify delayed job exists in Redis:
+```bash
+redis-cli ZRANGE bull:abandoned-cart-triggers:delayed 0 -1 WITHSCORES
+# Expected: job "abandoned-cart-ORDER_ID-FLOW_ID" present
+```
+
+3. Complete the order by sending a `payment.succeeded` or `order.completed` event:
+```bash
+echo '{"eventType":"payment.succeeded","restaurantId":"YOUR_RESTAURANT_ID","payload":{"customerId":"YOUR_CUSTOMER_ID","orderId":"ORDER_ID","customerEmail":"test@example.com","customerName":"Test User","orderTotal":32.50}}' | kcat -b localhost:9092 -t orderchop.payments -P
+```
+
+4. Verify the job was removed from Redis:
+```bash
+redis-cli ZRANGE bull:abandoned-cart-triggers:delayed 0 -1 WITHSCORES
+# Expected: job "abandoned-cart-ORDER_ID-FLOW_ID" no longer present
+```
+
+**Expected server logs:**
+```
+[OrderEventConsumer] Cancelled abandoned cart job for orderId=ORDER_ID, flowId=FLOW_ID
+```
+
+5. Wait for the original delay to expire — no flow should fire (job was already removed).
+
 #### BullMQ Queue Inspection
 
 ```bash

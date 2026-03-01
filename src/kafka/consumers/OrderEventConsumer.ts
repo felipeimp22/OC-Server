@@ -12,6 +12,8 @@ import { env } from '../../config/env.js';
 import { KAFKA_TOPICS } from '../topics.js';
 import { ContactService } from '../../services/ContactService.js';
 import { TriggerService } from '../../services/TriggerService.js';
+import { FlowRepository } from '../../repositories/FlowRepository.js';
+import { abandonedCartQueue } from './CartEventConsumer.js';
 import { tryProcessEvent } from '../../utils/idempotency.js';
 import { createLogger } from '../../config/logger.js';
 
@@ -29,10 +31,12 @@ export class OrderEventConsumer {
   private consumer: ReturnType<typeof createConsumer> | null = null;
   private readonly contactService: ContactService;
   private readonly triggerService: TriggerService;
+  private readonly flowRepo: FlowRepository;
 
   constructor() {
     this.contactService = new ContactService();
     this.triggerService = new TriggerService();
+    this.flowRepo = new FlowRepository();
   }
 
   async start(): Promise<void> {
@@ -201,6 +205,11 @@ export class OrderEventConsumer {
         totalOrders: updatedContact.totalOrders,
       });
     }
+
+    // Cancel pending abandoned cart jobs for this order
+    if (orderId) {
+      await this.cancelAbandonedCartJobs(restaurantId, orderId);
+    }
   }
 
   /**
@@ -289,6 +298,12 @@ export class OrderEventConsumer {
 
     // Backward compatibility: also evaluate payment_succeeded triggers
     await this.triggerService.evaluateTriggers(restaurantId, 'payment_succeeded', contact._id.toString(), triggerContext);
+
+    // Cancel pending abandoned cart jobs for this order (payment = order no longer abandoned)
+    const orderId = payload.orderId as string | undefined;
+    if (orderId) {
+      await this.cancelAbandonedCartJobs(restaurantId, orderId);
+    }
   }
 
   /**
@@ -343,6 +358,34 @@ export class OrderEventConsumer {
     if (!contact) return;
 
     await this.triggerService.evaluateTriggers(restaurantId, eventType, contact._id.toString(), payload);
+  }
+
+  /**
+   * Cancel all pending abandoned cart BullMQ jobs for a given orderId.
+   *
+   * Looks up all active abandoned_cart flows for the restaurant, then removes
+   * each deterministic jobId (`abandoned-cart-${orderId}-${flowId}`).
+   * BullMQ Queue.remove() is a no-op if the job doesn't exist, so this is safe
+   * to call even when no abandoned cart event was ever emitted for the order.
+   */
+  private async cancelAbandonedCartJobs(restaurantId: string, orderId: string): Promise<void> {
+    if (!abandonedCartQueue || !orderId) return;
+
+    try {
+      const flows = await this.flowRepo.findActiveByTrigger(restaurantId, 'abandoned_cart');
+      if (flows.length === 0) return;
+
+      for (const flow of flows) {
+        const flowId = flow._id.toString();
+        const jobId = `abandoned-cart-${orderId}-${flowId}`;
+        await abandonedCartQueue.remove(jobId);
+        log.info({ orderId, flowId, jobId }, 'Cancelled abandoned cart job for orderId=%s, flowId=%s', orderId, flowId);
+      }
+    } catch (err) {
+      // Non-critical: if cancellation fails, AbandonedCartProcessor's order status check
+      // provides defense-in-depth by skipping completed orders at processing time
+      log.warn({ err, restaurantId, orderId }, 'Failed to cancel abandoned cart jobs — processor will check order status');
+    }
   }
 
   async stop(): Promise<void> {

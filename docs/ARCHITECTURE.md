@@ -328,16 +328,20 @@ cart.abandoned Kafka event
 
 ### Cancellation (Order Completion)
 
-When an order is completed or paid, `OrderEventConsumer` cancels all pending abandoned cart jobs for that orderId:
+When an order is completed or paid, `OrderEventConsumer.cancelAbandonedCartJobs()` removes all pending BullMQ jobs for that orderId. Two entry points trigger cancellation:
+
+1. **`processOrderAsCompleted()`** — fires on fulfillment statuses (ready, out_for_delivery, delivered, completed)
+2. **`handleNewOrder()`** — fires on payment.succeeded (payment = order no longer abandoned)
 
 ```
 order completed/paid
-  → Find all active abandoned_cart flows
-  → For each flow: queue.remove('abandoned-cart-${orderId}-${flowId}')
+  → OrderEventConsumer.cancelAbandonedCartJobs(restaurantId, orderId)
+  → FlowRepository.findActiveByTrigger(restaurantId, 'abandoned_cart')
+  → For each flow: abandonedCartQueue.remove('abandoned-cart-${orderId}-${flowId}')
   → BullMQ Queue.remove() is a no-op if job doesn't exist (safe)
 ```
 
-Cancellation is scoped per-orderId — it never touches other customers' jobs or other flow types.
+Cancellation is scoped per-orderId — it never touches other customers' jobs or other flow types. If cancellation fails (e.g., Redis unavailable), the AbandonedCartProcessor's order status check provides defense-in-depth by skipping completed orders at processing time.
 
 ### AbandonedCartProcessor (Worker)
 
