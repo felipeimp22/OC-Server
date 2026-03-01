@@ -15,7 +15,8 @@ How to manually test the CRM engine end-to-end: REST API via Insomnia/Postman, K
 7. [Full Pipeline Testing (Event → Flow → Action)](#7-full-pipeline-testing)
 8. [Seed Data](#8-seed-data)
 9. [Testing the Event Bridge from oc-restaurant-manager](#9-testing-the-event-bridge)
-10. [Troubleshooting](#10-troubleshooting)
+10. [Trigger System Testing](#10-trigger-system-testing)
+11. [Troubleshooting](#11-troubleshooting)
 
 ---
 
@@ -818,7 +819,322 @@ This tests sync-contacts, seed, flow creation/activation, Kafka event publishing
 
 ---
 
-## 10. Troubleshooting
+## 10. Trigger System Testing
+
+This section covers testing the three trigger types overhauled in the CRM trigger system: **order_completed** (fulfillment statuses), **order_status_changed** (targetStatus filter), and **new_order** (payment.succeeded). Each subsection includes copy-paste kcat commands, expected server logs, and MongoDB verification queries.
+
+**Prerequisites**: Kafka running (`ENABLE_KAFKA=true`), an existing restaurant ID, and at least one customer ID in the database. Replace `YOUR_RESTAURANT_ID` and `YOUR_CUSTOMER_ID` with real ObjectId strings throughout.
+
+---
+
+### 10.1 Order Completed — Fulfillment Statuses
+
+The `order_completed` trigger fires when an order reaches any of these statuses: `ready`, `out_for_delivery`, `delivered`, `completed`. It fires exactly once per order thanks to `tryProcessEvent` idempotency.
+
+#### Setup: Create and activate a flow with order_completed trigger
+
+```bash
+# Create flow
+curl -s -X POST http://localhost:3001/api/v1/flows \
+  -H "Authorization: Bearer TOKEN" \
+  -H "X-Restaurant-Id: YOUR_RESTAURANT_ID" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "Test Order Completed Flow",
+    "nodes": [
+      { "id": "t1", "type": "trigger", "subType": "order_completed", "label": "Order Completed", "config": {}, "position": {"x":0,"y":0} },
+      { "id": "a1", "type": "action", "subType": "send_email", "label": "Thank You Email",
+        "config": { "recipients": [{"type":"customer"}], "subject": "Thanks!", "body": "Your order is on its way." },
+        "position": {"x":0,"y":150} }
+    ],
+    "edges": [{ "id": "e1", "sourceNodeId": "t1", "targetNodeId": "a1" }]
+  }'
+# Note the flow ID from the response
+
+# Activate the flow
+curl -s -X POST http://localhost:3001/api/v1/flows/FLOW_ID/activate \
+  -H "Authorization: Bearer TOKEN" \
+  -H "X-Restaurant-Id: YOUR_RESTAURANT_ID"
+```
+
+#### Test A: First qualifying status fires the trigger
+
+Send an `order.status_changed` event with status `ready`:
+
+```bash
+echo '{"eventType":"order.status_changed","restaurantId":"YOUR_RESTAURANT_ID","payload":{"orderId":"order-test-001","orderNumber":"ORD-001","customerId":"YOUR_CUSTOMER_ID","customerEmail":"test@example.com","customerName":"Test User","customerPhone":"+15551234567","orderType":"delivery","orderTotal":45.99,"paymentStatus":"paid","status":"ready","previousStatus":"preparing"}}' | kcat -b localhost:9092 -t orderchop.orders -P
+```
+
+**Expected server logs:**
+```
+[OrderEventConsumer] Processing order event {"eventType":"order.status_changed","orderId":"order-test-001"}
+[TriggerService] Matched N active flows for trigger "order_status_changed"
+[OrderEventConsumer] Qualifying fulfillment status — firing processOrderAsCompleted {"orderId":"order-test-001","newStatus":"ready"}
+[TriggerService] Matched N active flows for trigger "order_completed"
+[FlowEngineService] Enrolling contact into flow ...
+```
+
+**Verify — flow execution created:**
+```javascript
+db.crm_flow_executions.find({
+  restaurantId: ObjectId("YOUR_RESTAURANT_ID"),
+  "context.orderId": "order-test-001"
+}).pretty()
+// Expected: 1 document with status "active" or "completed"
+```
+
+**Verify — order stats incremented:**
+```javascript
+db.crm_contacts.findOne({
+  restaurantId: ObjectId("YOUR_RESTAURANT_ID"),
+  customerId: ObjectId("YOUR_CUSTOMER_ID")
+}, { totalOrders: 1, totalSpent: 1 })
+// Expected: totalOrders incremented by 1, totalSpent increased by 45.99
+```
+
+**Verify — idempotency record created:**
+```javascript
+db.crm_processed_events.findOne({ eventId: "order_completed_process:order-test-001" })
+// Expected: 1 document (confirms tryProcessEvent recorded this order)
+```
+
+#### Test B: Second qualifying status does NOT re-fire
+
+Send a `order.status_changed` event for the same order with status `delivered`:
+
+```bash
+echo '{"eventType":"order.status_changed","restaurantId":"YOUR_RESTAURANT_ID","payload":{"orderId":"order-test-001","orderNumber":"ORD-001","customerId":"YOUR_CUSTOMER_ID","customerEmail":"test@example.com","customerName":"Test User","customerPhone":"+15551234567","orderType":"delivery","orderTotal":45.99,"paymentStatus":"paid","status":"delivered","previousStatus":"ready"}}' | kcat -b localhost:9092 -t orderchop.orders -P
+```
+
+**Expected server logs:**
+```
+[OrderEventConsumer] Qualifying fulfillment status — firing processOrderAsCompleted {"orderId":"order-test-001","newStatus":"delivered"}
+[OrderEventConsumer] Order already processed as completed — skipping duplicate {"orderId":"order-test-001"}
+```
+
+**Verify — no additional flow execution:**
+```javascript
+db.crm_flow_executions.find({
+  restaurantId: ObjectId("YOUR_RESTAURANT_ID"),
+  "context.orderId": "order-test-001"
+}).count()
+// Expected: still 1 (no new execution)
+```
+
+---
+
+### 10.2 Order Completed — Dual-Event-Path Dedup
+
+When `kitchen.actions.ts` sets an order to `completed`, it publishes BOTH `order.status_changed` and `order.completed` Kafka events. The system must process the order exactly once.
+
+#### Test: Both events arrive for the same order
+
+Use a fresh orderId to avoid interference:
+
+```bash
+# Event 1: order.status_changed with status=completed
+echo '{"eventType":"order.status_changed","restaurantId":"YOUR_RESTAURANT_ID","payload":{"orderId":"order-test-002","orderNumber":"ORD-002","customerId":"YOUR_CUSTOMER_ID","customerEmail":"test@example.com","customerName":"Test User","customerPhone":"+15551234567","orderType":"pickup","orderTotal":25.00,"paymentStatus":"paid","status":"completed","previousStatus":"ready"}}' | kcat -b localhost:9092 -t orderchop.orders -P
+
+# Event 2: order.completed (arrives shortly after)
+echo '{"eventType":"order.completed","restaurantId":"YOUR_RESTAURANT_ID","payload":{"orderId":"order-test-002","orderNumber":"ORD-002","customerId":"YOUR_CUSTOMER_ID","customerEmail":"test@example.com","customerName":"Test User","customerPhone":"+15551234567","orderType":"pickup","orderTotal":25.00,"paymentStatus":"paid","status":"completed"}}' | kcat -b localhost:9092 -t orderchop.orders -P
+```
+
+**Expected:** The first event processed triggers the flow and increments stats. The second event is blocked by `tryProcessEvent`.
+
+**Verify — exactly one execution:**
+```javascript
+db.crm_flow_executions.find({
+  restaurantId: ObjectId("YOUR_RESTAURANT_ID"),
+  "context.orderId": "order-test-002"
+}).count()
+// Expected: 1
+
+db.crm_processed_events.findOne({ eventId: "order_completed_process:order-test-002" })
+// Expected: exists (confirms dedup key was set by whichever event arrived first)
+```
+
+---
+
+### 10.3 Order Status Changed — targetStatus Filter
+
+The `order_status_changed` trigger supports a `config.targetStatus` filter. If set, the trigger fires only when the new status matches. If empty or unset, it fires on every status change.
+
+#### Setup: Create a flow with targetStatus = 'confirmed'
+
+```bash
+curl -s -X POST http://localhost:3001/api/v1/flows \
+  -H "Authorization: Bearer TOKEN" \
+  -H "X-Restaurant-Id: YOUR_RESTAURANT_ID" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "Test Status Changed — Confirmed Only",
+    "nodes": [
+      { "id": "t1", "type": "trigger", "subType": "order_status_changed", "label": "Status Changed",
+        "config": { "targetStatus": "confirmed" }, "position": {"x":0,"y":0} },
+      { "id": "a1", "type": "action", "subType": "send_email", "label": "Confirmed Email",
+        "config": { "recipients": [{"type":"customer"}], "subject": "Order Confirmed!", "body": "Your order has been confirmed." },
+        "position": {"x":0,"y":150} }
+    ],
+    "edges": [{ "id": "e1", "sourceNodeId": "t1", "targetNodeId": "a1" }]
+  }'
+
+# Activate the flow
+curl -s -X POST http://localhost:3001/api/v1/flows/FLOW_ID/activate \
+  -H "Authorization: Bearer TOKEN" \
+  -H "X-Restaurant-Id: YOUR_RESTAURANT_ID"
+```
+
+#### Test A: Non-matching status — trigger does NOT fire
+
+```bash
+echo '{"eventType":"order.status_changed","restaurantId":"YOUR_RESTAURANT_ID","payload":{"orderId":"order-test-003","orderNumber":"ORD-003","customerId":"YOUR_CUSTOMER_ID","customerEmail":"test@example.com","customerName":"Test User","customerPhone":"+15551234567","orderType":"delivery","orderTotal":30.00,"paymentStatus":"paid","status":"preparing","previousStatus":"pending"}}' | kcat -b localhost:9092 -t orderchop.orders -P
+```
+
+**Expected server logs:**
+```
+[TriggerService] targetStatus mismatch {"configuredStatus":"confirmed","actualStatus":"preparing","reason":"targetStatus mismatch"}
+```
+
+**Verify — no execution created:**
+```javascript
+db.crm_flow_executions.find({
+  restaurantId: ObjectId("YOUR_RESTAURANT_ID"),
+  "context.orderId": "order-test-003"
+}).count()
+// Expected: 0
+```
+
+#### Test B: Matching status — trigger fires
+
+```bash
+echo '{"eventType":"order.status_changed","restaurantId":"YOUR_RESTAURANT_ID","payload":{"orderId":"order-test-004","orderNumber":"ORD-004","customerId":"YOUR_CUSTOMER_ID","customerEmail":"test@example.com","customerName":"Test User","customerPhone":"+15551234567","orderType":"delivery","orderTotal":30.00,"paymentStatus":"paid","status":"confirmed","previousStatus":"pending"}}' | kcat -b localhost:9092 -t orderchop.orders -P
+```
+
+**Expected:** Flow fires, contact enrolled.
+
+**Verify — execution created:**
+```javascript
+db.crm_flow_executions.find({
+  restaurantId: ObjectId("YOUR_RESTAURANT_ID"),
+  "context.orderId": "order-test-004"
+}).count()
+// Expected: 1
+```
+
+#### Test C: Empty targetStatus — fires on every status change
+
+Create a second flow with `"config": {}` (no targetStatus), activate it, then send any status change — it should fire for every status.
+
+---
+
+### 10.4 New Order — payment.succeeded
+
+The `new_order` trigger fires on `payment.succeeded` Kafka events. It uses `upsertFromEvent()` so it works for first-time customers. It does NOT increment order stats.
+
+#### Setup: Create and activate a flow with new_order trigger
+
+```bash
+curl -s -X POST http://localhost:3001/api/v1/flows \
+  -H "Authorization: Bearer TOKEN" \
+  -H "X-Restaurant-Id: YOUR_RESTAURANT_ID" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "Test New Order Flow",
+    "nodes": [
+      { "id": "t1", "type": "trigger", "subType": "new_order", "label": "New Order", "config": {}, "position": {"x":0,"y":0} },
+      { "id": "a1", "type": "action", "subType": "send_email", "label": "Order Received Email",
+        "config": { "recipients": [{"type":"customer"}], "subject": "We got your order!", "body": "Thanks for ordering, {{customer.first_name}}!" },
+        "position": {"x":0,"y":150} }
+    ],
+    "edges": [{ "id": "e1", "sourceNodeId": "t1", "targetNodeId": "a1" }]
+  }'
+
+# Activate the flow
+curl -s -X POST http://localhost:3001/api/v1/flows/FLOW_ID/activate \
+  -H "Authorization: Bearer TOKEN" \
+  -H "X-Restaurant-Id: YOUR_RESTAURANT_ID"
+```
+
+#### Test: payment.succeeded fires new_order trigger
+
+```bash
+echo '{"eventType":"payment.succeeded","restaurantId":"YOUR_RESTAURANT_ID","payload":{"orderId":"order-test-005","orderNumber":"ORD-005","customerId":"YOUR_CUSTOMER_ID","customerEmail":"newcustomer@example.com","customerName":"New Customer","customerPhone":"+15559876543","orderType":"pickup","orderTotal":18.50,"paymentStatus":"paid","paymentMethod":"card"}}' | kcat -b localhost:9092 -t orderchop.payments -P
+```
+
+**Expected server logs:**
+```
+[OrderEventConsumer] Processing order event {"eventType":"payment.succeeded","orderId":"order-test-005"}
+[TriggerService] Matched N active flows for trigger "new_order"
+[FlowEngineService] Enrolling contact into flow ...
+```
+
+**Verify — flow execution created:**
+```javascript
+db.crm_flow_executions.find({
+  restaurantId: ObjectId("YOUR_RESTAURANT_ID"),
+  "context.orderId": "order-test-005"
+}).count()
+// Expected: 1
+```
+
+**Verify — contact upserted (works for first-time customers):**
+```javascript
+db.crm_contacts.findOne({
+  restaurantId: ObjectId("YOUR_RESTAURANT_ID"),
+  customerId: ObjectId("YOUR_CUSTOMER_ID")
+}, { totalOrders: 1, totalSpent: 1, email: 1 })
+// Expected: contact exists; totalOrders and totalSpent NOT incremented by this event
+```
+
+**Verify — stats NOT incremented:**
+Note the contact's `totalOrders` and `totalSpent` before and after the payment.succeeded event. They should remain unchanged — stats are only incremented in `processOrderAsCompleted()` (fulfillment statuses), not on payment confirmation.
+
+#### Test: Duplicate payment.succeeded for same order — no re-fire
+
+```bash
+echo '{"eventType":"payment.succeeded","restaurantId":"YOUR_RESTAURANT_ID","payload":{"orderId":"order-test-005","orderNumber":"ORD-005","customerId":"YOUR_CUSTOMER_ID","customerEmail":"newcustomer@example.com","customerName":"New Customer","customerPhone":"+15559876543","orderType":"pickup","orderTotal":18.50,"paymentStatus":"paid","paymentMethod":"card"}}' | kcat -b localhost:9092 -t orderchop.payments -P
+```
+
+**Expected:** The per-flow orderId dedup (`hasOrderBeenProcessedForFlow`) in TriggerService prevents re-enrollment.
+
+**Verify — still exactly one execution:**
+```javascript
+db.crm_flow_executions.find({
+  restaurantId: ObjectId("YOUR_RESTAURANT_ID"),
+  "context.orderId": "order-test-005"
+}).count()
+// Expected: 1 (no duplicate)
+```
+
+---
+
+### 10.5 Quick Reference — MongoDB Verification Queries
+
+```javascript
+// Check all flow executions for a specific order
+db.crm_flow_executions.find({ "context.orderId": "ORDER_ID" }).pretty()
+
+// Check the processed events collection for dedup keys
+db.crm_processed_events.find({ eventId: /order_completed_process/ }).sort({ processedAt: -1 }).limit(5)
+
+// Check contact stats (totalOrders, totalSpent)
+db.crm_contacts.findOne(
+  { restaurantId: ObjectId("YOUR_RESTAURANT_ID"), customerId: ObjectId("YOUR_CUSTOMER_ID") },
+  { totalOrders: 1, totalSpent: 1, lifecycleStatus: 1 }
+)
+
+// Count executions per flow (useful for verifying dedup)
+db.crm_flow_executions.aggregate([
+  { $match: { restaurantId: ObjectId("YOUR_RESTAURANT_ID") } },
+  { $group: { _id: { flowId: "$flowId", orderId: "$context.orderId" }, count: { $sum: 1 } } },
+  { $match: { count: { $gt: 1 } } }
+])
+// Expected: empty result (no order should appear more than once per flow)
+```
+
+---
+
+## 11. Troubleshooting
 
 ### Common Issues
 
