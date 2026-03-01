@@ -821,7 +821,7 @@ This tests sync-contacts, seed, flow creation/activation, Kafka event publishing
 
 ## 10. Trigger System Testing
 
-This section covers testing the three trigger types overhauled in the CRM trigger system: **order_completed** (fulfillment statuses), **order_status_changed** (targetStatus filter), and **new_order** (payment.succeeded). Each subsection includes copy-paste kcat commands, expected server logs, and MongoDB verification queries.
+This section covers testing triggers, execution features, and item-based triggers in the CRM engine. Subsections 10.1–10.7 cover the original trigger types: **order_completed** (fulfillment statuses), **order_status_changed** (targetStatus filter), **new_order** (payment.succeeded), template variables, and abandoned cart. Subsection 10.8 covers **action chaining and fan-out** (v3). Subsection 10.9 covers **item_ordered** and **item_ordered_x_times** triggers (v3). Each subsection includes copy-paste commands, expected server logs, and MongoDB verification queries.
 
 **Prerequisites**: Kafka running (`ENABLE_KAFKA=true`), an existing restaurant ID, and at least one customer ID in the database. Replace `YOUR_RESTAURANT_ID` and `YOUR_CUSTOMER_ID` with real ObjectId strings throughout.
 
@@ -1393,7 +1393,7 @@ Then restart with `ENABLE_SCHEDULERS=true` and watch for:
 
 ### Graph Validation Examples
 
-Test the 9 validation rules via the REST API:
+Test the 11 validation rules via the REST API:
 
 **R-1: Exactly one trigger node required**
 ```bash
@@ -1404,17 +1404,230 @@ curl -X PUT http://localhost:3001/api/v1/flows/FLOW_ID \
 # → 422 { "error": "INVALID_GRAPH", "rule": "R-1", "message": "Exactly one trigger node required..." }
 ```
 
-**R-4: Action nodes must be terminal (no outgoing edges)**
+**R-4: Action nodes MAY have outgoing edges (action chaining and fan-out)**
 ```bash
+# This is now VALID in v3 — action→action chaining is supported
 curl -X PUT http://localhost:3001/api/v1/flows/FLOW_ID \
   -H "Authorization: Bearer TOKEN" -H "X-Restaurant-Id: REST_ID" \
   -H "Content-Type: application/json" \
   -d '{"nodes":[{"id":"t1","type":"trigger","subType":"order_completed"},{"id":"a1","type":"action","subType":"send_email"},{"id":"a2","type":"action","subType":"send_sms"}],"edges":[{"id":"e1","sourceNodeId":"t1","targetNodeId":"a1"},{"id":"e2","sourceNodeId":"a1","targetNodeId":"a2"}]}'
-# → 422 { "error": "INVALID_GRAPH", "rule": "R-4" }
+# → 200 OK (action chaining is valid in v3)
 ```
 
 **R-5: No cycles allowed**
 A flow where node A → node B → node A would return 422 R-5.
+
+**R-11: Fan-out constraint — max 10 outgoing edges per node**
+```bash
+# A node with 11+ outgoing edges is rejected
+curl -X PUT http://localhost:3001/api/v1/flows/FLOW_ID \
+  -H "Authorization: Bearer TOKEN" -H "X-Restaurant-Id: REST_ID" \
+  -H "Content-Type: application/json" \
+  -d '{"nodes":[{"id":"t1","type":"trigger","subType":"order_completed"},{"id":"a1","type":"action","subType":"send_email"},{"id":"a2","type":"action","subType":"send_email"},{"id":"a3","type":"action","subType":"send_email"},{"id":"a4","type":"action","subType":"send_email"},{"id":"a5","type":"action","subType":"send_email"},{"id":"a6","type":"action","subType":"send_email"},{"id":"a7","type":"action","subType":"send_email"},{"id":"a8","type":"action","subType":"send_email"},{"id":"a9","type":"action","subType":"send_email"},{"id":"a10","type":"action","subType":"send_email"},{"id":"a11","type":"action","subType":"send_email"}],"edges":[{"id":"e1","sourceNodeId":"t1","targetNodeId":"a1"},{"id":"e2","sourceNodeId":"t1","targetNodeId":"a2"},{"id":"e3","sourceNodeId":"t1","targetNodeId":"a3"},{"id":"e4","sourceNodeId":"t1","targetNodeId":"a4"},{"id":"e5","sourceNodeId":"t1","targetNodeId":"a5"},{"id":"e6","sourceNodeId":"t1","targetNodeId":"a6"},{"id":"e7","sourceNodeId":"t1","targetNodeId":"a7"},{"id":"e8","sourceNodeId":"t1","targetNodeId":"a8"},{"id":"e9","sourceNodeId":"t1","targetNodeId":"a9"},{"id":"e10","sourceNodeId":"t1","targetNodeId":"a10"},{"id":"e11","sourceNodeId":"t1","targetNodeId":"a11"}]}'
+# → 422 { "error": "INVALID_GRAPH", "rule": "R-11", "message": "Node t1 has 11 outgoing edges (max 10)" }
+```
+
+### 10.8 Action Chaining and Fan-Out
+
+Test scenarios for v3 action chaining and parallel fan-out execution.
+
+#### Action Chaining (email → sms)
+
+**Step 1: Create a flow with chained actions**
+```bash
+curl -X POST http://localhost:3001/api/v1/flows \
+  -H "Authorization: Bearer TOKEN" -H "X-Restaurant-Id: REST_ID" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "Action Chain Test",
+    "description": "Test email → sms chain",
+    "nodes": [
+      {"id":"t1","type":"trigger","subType":"order_completed","label":"Order Completed","config":{},"position":{"x":100,"y":100}},
+      {"id":"a1","type":"action","subType":"send_email","label":"Thank You Email","config":{"recipients":[{"type":"customer"}],"subject":"Thanks {{customer.first_name}}!","body":"Your order #{{order.number}} is complete."},"position":{"x":100,"y":250}},
+      {"id":"a2","type":"action","subType":"send_sms","label":"Follow-up SMS","config":{"recipient":{"type":"customer"},"body":"Thanks for ordering! -{{restaurant.name}}"},"position":{"x":100,"y":400}}
+    ],
+    "edges": [
+      {"id":"e1","sourceNodeId":"t1","targetNodeId":"a1"},
+      {"id":"e2","sourceNodeId":"a1","targetNodeId":"a2"}
+    ]
+  }'
+```
+
+**Step 2: Activate the flow and trigger with an order.completed event**
+
+**Step 3: Verify both actions executed in sequence**
+```javascript
+// Check execution logs — should show email first, then sms
+db.crm_flow_execution_logs.find({ executionId: '<EXEC_ID>' }).sort({ executedAt: 1 })
+// Expected: [{ nodeType: 'trigger', ... }, { nodeType: 'action', action: 'send_email', ... }, { nodeType: 'action', action: 'send_sms', ... }]
+```
+
+**Step 4: Verify execution completed**
+```javascript
+db.crm_flow_executions.findOne({ _id: ObjectId('<EXEC_ID>') })
+// Expected: status='completed', completedNodes includes all 3 node IDs, pendingNodes=[]
+```
+
+#### Fan-Out (trigger → 3 parallel actions)
+
+**Step 1: Create a flow with fan-out**
+```bash
+curl -X POST http://localhost:3001/api/v1/flows \
+  -H "Authorization: Bearer TOKEN" -H "X-Restaurant-Id: REST_ID" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "Fan-Out Test",
+    "description": "Test trigger → 3 parallel actions",
+    "nodes": [
+      {"id":"t1","type":"trigger","subType":"order_completed","label":"Order Completed","config":{},"position":{"x":250,"y":100}},
+      {"id":"a1","type":"action","subType":"send_email","label":"Customer Email","config":{"recipients":[{"type":"customer"}],"subject":"Order complete","body":"Thanks!"},"position":{"x":100,"y":300}},
+      {"id":"a2","type":"action","subType":"send_email","label":"Restaurant Email","config":{"recipients":[{"type":"restaurant"}],"subject":"Order fulfilled","body":"Order complete."},"position":{"x":250,"y":300}},
+      {"id":"a3","type":"action","subType":"send_sms","label":"Customer SMS","config":{"recipient":{"type":"customer"},"body":"Your order is ready!"},"position":{"x":400,"y":300}}
+    ],
+    "edges": [
+      {"id":"e1","sourceNodeId":"t1","targetNodeId":"a1"},
+      {"id":"e2","sourceNodeId":"t1","targetNodeId":"a2"},
+      {"id":"e3","sourceNodeId":"t1","targetNodeId":"a3"}
+    ]
+  }'
+```
+
+**Step 2: Activate and trigger — all 3 actions should execute via parallel Kafka events**
+
+**Step 3: Verify parallel execution**
+```javascript
+// All 3 actions should appear in execution logs
+db.crm_flow_execution_logs.find({ executionId: '<EXEC_ID>', nodeType: 'action' }).count()
+// Expected: 3
+
+// Execution should be completed with all nodes done
+db.crm_flow_executions.findOne({ _id: ObjectId('<EXEC_ID>') })
+// Expected: status='completed', completedNodes.length=4 (trigger + 3 actions), pendingNodes=[], erroredNodes=[]
+```
+
+#### Error Isolation in Fan-Out
+
+If one parallel branch fails (e.g., invalid email config), sibling branches should still complete:
+
+```javascript
+// After triggering a fan-out where one action has bad config:
+db.crm_flow_executions.findOne({ _id: ObjectId('<EXEC_ID>') })
+// Expected: status='completed' (not 'error'), erroredNodes=['<failed_node_id>'], completedNodes includes the successful nodes
+```
+
+### 10.9 Item-Based Trigger Testing
+
+#### item_ordered — Item Match + Modifier Match
+
+**Step 1: Create a flow with item_ordered trigger**
+```bash
+curl -X POST http://localhost:3001/api/v1/flows \
+  -H "Authorization: Bearer TOKEN" -H "X-Restaurant-Id: REST_ID" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "Item Ordered Test",
+    "description": "Fires when customer orders a specific item",
+    "nodes": [
+      {"id":"t1","type":"trigger","subType":"item_ordered","label":"Item Ordered","config":{"items":[{"menuItemId":"MENU_ITEM_ID","menuItemName":"Margherita Pizza","modifiers":[]}],"matchMode":"any"},"position":{"x":100,"y":100}},
+      {"id":"a1","type":"action","subType":"send_email","label":"Item Promo Email","config":{"recipients":[{"type":"customer"}],"subject":"You ordered {{matched_item.name}}!","body":"We noticed you ordered {{matched_item.name}}. Here is a special offer!"},"position":{"x":100,"y":300}}
+    ],
+    "edges": [
+      {"id":"e1","sourceNodeId":"t1","targetNodeId":"a1"}
+    ]
+  }'
+```
+
+**Step 2: Activate the flow**
+
+**Step 3: Simulate an order.completed event for an order that contains the configured menu item**
+
+**Step 4: Verify trigger fired**
+```javascript
+// Flow execution should exist for this order
+db.crm_flow_executions.findOne({ flowId: ObjectId('<FLOW_ID>'), 'context.orderId': '<ORDER_ID>' })
+// Expected: status='completed'
+```
+
+**Step 5: Test with modifier matching**
+
+Create a flow where the trigger config includes modifiers:
+```json
+{
+  "items": [{
+    "menuItemId": "MENU_ITEM_ID",
+    "menuItemName": "Burger",
+    "modifiers": [{
+      "optionName": "Size",
+      "choiceNames": ["Large"]
+    }]
+  }],
+  "matchMode": "any"
+}
+```
+
+- An order with the Burger item + Size=Large → trigger fires ✅
+- An order with the Burger item + Size=Small → trigger does NOT fire ✗
+- An order with the Burger item + no Size option → trigger does NOT fire ✗ (modifiers specified means they must match)
+
+**Step 6: Test matchMode 'all'**
+
+Create a config with 2 items and `matchMode: 'all'`:
+- An order containing BOTH items → trigger fires ✅
+- An order containing only one item → trigger does NOT fire ✗
+
+#### item_ordered_x_times — Cumulative Count Threshold
+
+**Step 1: Create a flow with item_ordered_x_times trigger**
+```bash
+curl -X POST http://localhost:3001/api/v1/flows \
+  -H "Authorization: Bearer TOKEN" -H "X-Restaurant-Id: REST_ID" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "Loyalty Item Test",
+    "description": "Fires on 3rd order of a specific item",
+    "nodes": [
+      {"id":"t1","type":"trigger","subType":"item_ordered_x_times","label":"Item Ordered 3 Times","config":{"items":[{"menuItemId":"MENU_ITEM_ID","menuItemName":"Margherita Pizza","modifiers":[]}],"matchMode":"any","threshold":3},"position":{"x":100,"y":100}},
+      {"id":"a1","type":"action","subType":"send_email","label":"Loyalty Reward","config":{"recipients":[{"type":"customer"}],"subject":"Loyalty reward!","body":"You have ordered {{matched_item.name}} {{matched_item.total_orders}} times! Here is a discount."},"position":{"x":100,"y":300}}
+    ],
+    "edges": [
+      {"id":"e1","sourceNodeId":"t1","targetNodeId":"a1"}
+    ]
+  }'
+```
+
+**Step 2: Activate the flow**
+
+**Step 3: Simulate 3 completed orders for the same customer containing the configured menu item**
+
+**Step 4: Verify the trigger fires only on the 3rd order (exact threshold)**
+```javascript
+// Should have exactly 1 execution (not 0, not 3)
+db.crm_flow_executions.find({ flowId: ObjectId('<FLOW_ID>'), 'context.customerId': '<CUSTOMER_ID>' }).count()
+// Expected: 1
+
+// The execution should be from the 3rd order
+db.crm_flow_executions.findOne({ flowId: ObjectId('<FLOW_ID>'), 'context.customerId': '<CUSTOMER_ID>' })
+// Expected: context.orderId matches the 3rd order's ID
+```
+
+**Step 5: Verify the 4th order does NOT re-fire** (exact equality `===`, not `>=`)
+```javascript
+// After a 4th order with the same item:
+db.crm_flow_executions.find({ flowId: ObjectId('<FLOW_ID>'), 'context.customerId': '<CUSTOMER_ID>' }).count()
+// Expected: still 1 (not 2)
+```
+
+**Step 6: Verify cumulative counting query**
+```javascript
+// The aggregation counts across all paid orders
+db.orders.aggregate([
+  { $match: { restaurantId: ObjectId('REST_ID'), customerId: ObjectId('CUSTOMER_ID'), paymentStatus: 'paid' } },
+  { $unwind: '$items' },
+  { $match: { 'items.menuItemId': ObjectId('MENU_ITEM_ID') } },
+  { $count: 'total' }
+])
+// Expected: { total: N } where N is the lifetime count
+```
 
 ### Running Unit Tests
 
