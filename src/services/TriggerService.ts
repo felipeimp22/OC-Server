@@ -337,13 +337,24 @@ export class TriggerService {
       }
     }
 
-    // Check targetStatus filter (order_status_changed trigger — fire only for configured status)
-    if (config.targetStatus && typeof config.targetStatus === 'string' && config.targetStatus !== '') {
+    // Target status filtering — generic check for any trigger with config.targetStatuses.
+    // Backward compat: convert legacy single-string config.targetStatus to array format.
+    let effectiveTargetStatuses = config.targetStatuses as string[] | undefined;
+    if (
+      (!effectiveTargetStatuses || !Array.isArray(effectiveTargetStatuses) || effectiveTargetStatuses.length === 0) &&
+      config.targetStatus &&
+      typeof config.targetStatus === 'string' &&
+      config.targetStatus !== ''
+    ) {
+      effectiveTargetStatuses = [config.targetStatus];
+    }
+
+    if (effectiveTargetStatuses && Array.isArray(effectiveTargetStatuses) && effectiveTargetStatuses.length > 0) {
       const actualStatus = (payload.newStatus ?? (payload as any).status) as string | undefined;
-      if (actualStatus && config.targetStatus !== actualStatus) {
+      if (actualStatus && !effectiveTargetStatuses.includes(actualStatus)) {
         log.info(
-          { configuredStatus: config.targetStatus, actualStatus, reason: 'targetStatus mismatch' },
-          'targetStatus mismatch',
+          { configuredStatuses: effectiveTargetStatuses, actualStatus, reason: 'targetStatuses mismatch' },
+          'targetStatuses mismatch',
         );
         return false;
       }

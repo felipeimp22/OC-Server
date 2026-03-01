@@ -363,6 +363,39 @@ payment.succeeded → handleNewOrder()
 - **`tryProcessEvent`** prevents double stats increment across two Kafka event paths (order.status_changed + order.completed both fire when status='completed')
 - **`hasOrderBeenProcessedForFlow`** prevents per-flow re-enrollment across multiple qualifying status changes (ready → delivered → completed all qualify) and ensures one new_order fire per order per flow
 
+## Target Status Filtering
+
+Triggers can optionally restrict which order statuses they fire on using `config.targetStatuses: string[]`. This is a **generic check** in `TriggerService.checkTriggerConditions()` — it runs for any trigger that has `targetStatuses` set, not just a specific trigger type.
+
+### How It Works
+
+1. Read `config.targetStatuses` (array of status strings, e.g. `['delivered', 'completed']`)
+2. If the array is present and non-empty, get `actualStatus` from `payload.newStatus ?? payload.status`
+3. If `actualStatus` exists and is **NOT** in the `targetStatuses` array → return false (skip trigger)
+4. If `targetStatuses` is empty, undefined, or not an array → skip the check entirely (fire on any status — backward compatible default)
+
+### Backward Compatibility
+
+Legacy flows may have `config.targetStatus` (single string) instead of the new array format. Before the array check runs, the code converts:
+
+```
+if config.targetStatus is a non-empty string AND config.targetStatuses is NOT set:
+  effectiveTargetStatuses = [config.targetStatus]
+```
+
+This ensures existing `order_status_changed` flows with the old single-string config continue to work.
+
+### Which Triggers Use It
+
+| Trigger | targetStatuses | Notes |
+|---------|---------------|-------|
+| `item_ordered` | Optional | Filter by order status at time of trigger |
+| `item_ordered_x_times` | Optional | Filter by order status at time of trigger |
+| `order_status_changed` | Optional | Filter which status changes fire the trigger |
+| `order_completed` | Not used | Fires on qualifying fulfillment statuses via `processOrderAsCompleted` |
+| `first_order` | Not used | Same as order_completed |
+| `nth_order` | Not used | Same as order_completed |
+
 ## nth_order Trigger — Ordering Dependency
 
 The `nth_order` trigger fires exactly once when a customer's total completed orders reaches the configured threshold (`config.n`). This depends on a critical ordering invariant in `processOrderAsCompleted()`:
