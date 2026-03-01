@@ -5,6 +5,7 @@
  */
 
 export { FlowTimerProcessor } from './FlowTimerProcessor.js';
+export { AbandonedCartProcessor } from './AbandonedCartProcessor.js';
 export { InactivityChecker } from './InactivityChecker.js';
 export { LifecycleUpdater } from './LifecycleUpdater.js';
 export { ReviewRequestScheduler } from './ReviewRequestScheduler.js';

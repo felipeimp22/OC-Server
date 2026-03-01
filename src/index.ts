@@ -45,6 +45,7 @@ import {
 } from './kafka/index.js';
 import {
   FlowTimerProcessor,
+  AbandonedCartProcessor,
   InactivityChecker,
   LifecycleUpdater,
   ReviewRequestScheduler,
@@ -182,20 +183,24 @@ async function main(): Promise<void> {
 
   // 5. Start BullMQ workers and queues
   const timerProcessor = new FlowTimerProcessor();
+  const abandonedCartProcessor = new AbandonedCartProcessor();
   if (env.ENABLE_SCHEDULERS) {
     timerProcessor.start();
     log.info('BullMQ flow timer processor started');
 
     // Abandoned cart queue is initialized as a module-level singleton in CartEventConsumer.
-    // The queue (producer side) is ready when the module loads; the worker (AbandonedCartProcessor)
-    // will be registered in US-004.
+    // The queue (producer side) is ready when the module loads.
     if (abandonedCartQueue) {
       log.info('Abandoned cart delayed trigger queue ready');
     } else {
       log.warn('Abandoned cart queue not available — Redis disabled');
     }
+
+    // Start the worker that processes delayed abandoned cart jobs
+    abandonedCartProcessor.start();
+    log.info('BullMQ abandoned cart processor started');
   } else {
-    log.info('BullMQ flow timer processor skipped (ENABLE_SCHEDULERS=false)');
+    log.info('BullMQ workers skipped (ENABLE_SCHEDULERS=false)');
   }
 
   // 6. Start cron schedulers
@@ -233,8 +238,9 @@ async function main(): Promise<void> {
       scheduler.stop();
     }
 
-    // Stop BullMQ worker
+    // Stop BullMQ workers
     await timerProcessor.stop();
+    await abandonedCartProcessor.stop();
 
     // Stop Kafka consumers
     for (const consumer of consumers) {

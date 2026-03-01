@@ -339,9 +339,30 @@ order completed/paid
 
 Cancellation is scoped per-orderId — it never touches other customers' jobs or other flow types.
 
+### AbandonedCartProcessor (Worker)
+
+`src/schedulers/AbandonedCartProcessor.ts` — BullMQ Worker that processes delayed abandoned cart jobs.
+
+**Processing logic when a job fires:**
+
+1. Extract job data (restaurantId, flowId, orderId, contactId, etc.)
+2. If orderId exists: fetch order from `orders` collection via `Order.findById(orderId)`
+   - If order not found: log warning and skip (order may have been deleted)
+   - If order status is in completed set (`paid`, `confirmed`, `preparing`, `ready`, `out_for_delivery`, `delivered`, `completed`): log and skip — customer already ordered
+   - If order status is `pending`: proceed to trigger evaluation
+3. If no orderId: proceed to trigger evaluation (cart may not have an associated order)
+4. Build trigger context from job data and call `TriggerService.evaluateTriggers(restaurantId, 'abandoned_cart', contactId, context)`
+5. TriggerService handles enrollment, dedup (isContactEnrolled), and flow engine start
+
+**Worker configuration:**
+- Concurrency: 10 (matches FlowTimerProcessor)
+- Registered in `src/index.ts` alongside FlowTimerProcessor, guarded by `ENABLE_SCHEDULERS`
+- Graceful shutdown via `worker.close()` on SIGINT/SIGTERM
+
 ### Key Design Decisions
 
 1. **Separate queue from flow-timers**: `abandoned-cart-triggers` is independent from `flow-timers` for separate scaling and monitoring
 2. **Contact upserted before scheduling**: Ensures contactId exists in job data when the job fires days later
 3. **Deterministic jobId**: Enables O(1) cancellation without needing to scan the queue
 4. **Per-flow scheduling**: Multiple flows with different `delayDays` are handled independently — each gets its own job
+5. **Order status check at processing time**: Even if cancellation (US-005) fails or a race condition occurs, the processor double-checks order status before triggering — defense in depth

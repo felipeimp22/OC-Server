@@ -1201,6 +1201,101 @@ db.crm_communication_logs.find({
 
 ---
 
+### 10.7 Abandoned Cart Delayed Triggers
+
+The `abandoned_cart` trigger uses BullMQ delayed jobs. When a `cart.abandoned` event arrives, CartEventConsumer schedules a delayed job (1–90 days). The AbandonedCartProcessor picks up the job when the delay expires, checks if the order is still pending, and fires the trigger only if the cart is genuinely abandoned.
+
+#### Setup: Create and activate a flow with abandoned_cart trigger
+
+```bash
+curl -s -X POST http://localhost:3001/api/v1/flows \
+  -H "Authorization: Bearer TOKEN" \
+  -H "X-Restaurant-Id: YOUR_RESTAURANT_ID" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "Test Abandoned Cart Flow",
+    "nodes": [
+      { "id": "t1", "type": "trigger", "subType": "abandoned_cart", "label": "Abandoned Cart",
+        "config": { "delayDays": 1 }, "position": {"x":0,"y":0} },
+      { "id": "a1", "type": "action", "subType": "send_email", "label": "Cart Reminder",
+        "config": { "recipients": [{"type":"customer"}], "subject": "You left items in your cart!", "body": "Hi {{customer.first_name}}, come back and complete your order." },
+        "position": {"x":0,"y":150} }
+    ],
+    "edges": [{ "id": "e1", "sourceNodeId": "t1", "targetNodeId": "a1" }]
+  }'
+
+# Activate the flow
+curl -s -X POST http://localhost:3001/api/v1/flows/FLOW_ID/activate \
+  -H "Authorization: Bearer TOKEN" \
+  -H "X-Restaurant-Id: YOUR_RESTAURANT_ID"
+```
+
+#### Test A: Cart abandoned → delay expires → order still pending → flow triggers
+
+1. Send a `cart.abandoned` Kafka event:
+```bash
+echo '{"eventType":"cart.abandoned","restaurantId":"YOUR_RESTAURANT_ID","payload":{"customerId":"YOUR_CUSTOMER_ID","orderId":"ORDER_ID","customerEmail":"test@example.com","customerName":"Test User","total":32.50,"items":["Pizza","Coke"]}}' | kcat -b localhost:9092 -t orderchop.carts -P
+```
+
+2. Verify a BullMQ delayed job was scheduled:
+```bash
+redis-cli ZRANGE bull:abandoned-cart-triggers:delayed 0 -1 WITHSCORES
+# Expected: job with key "abandoned-cart-ORDER_ID-FLOW_ID" with future timestamp
+```
+
+3. For testing, set `delayDays: 0` or use short delay. When the job fires:
+
+**Expected server logs:**
+```
+[AbandonedCartProcessor] Abandoned cart job received {"orderId":"ORDER_ID","flowId":"FLOW_ID"}
+[AbandonedCartProcessor] Order still pending — triggering abandoned cart flow {"orderId":"ORDER_ID","orderStatus":"pending"}
+[TriggerService] Matched N active flows for trigger "abandoned_cart"
+```
+
+**Verify — flow execution created:**
+```javascript
+db.crm_flow_executions.find({
+  restaurantId: ObjectId("YOUR_RESTAURANT_ID"),
+  "context.orderId": "ORDER_ID"
+}).pretty()
+// Expected: 1 document with status "active" or "completed"
+```
+
+#### Test B: Cart abandoned → order completed before delay expires → flow skipped
+
+1. Send `cart.abandoned` event (same as Test A)
+2. Before the delay expires, complete the order (send order.completed or payment.succeeded event)
+3. When the job fires (or manually check):
+
+**Expected server logs:**
+```
+[AbandonedCartProcessor] Order already completed — skipping abandoned cart flow {"orderId":"ORDER_ID","orderStatus":"paid"}
+```
+
+**Verify — no flow execution:**
+```javascript
+db.crm_flow_executions.find({
+  restaurantId: ObjectId("YOUR_RESTAURANT_ID"),
+  "context.orderId": "ORDER_ID"
+}).count()
+// Expected: 0 (for abandoned_cart flows)
+```
+
+#### BullMQ Queue Inspection
+
+```bash
+# Check delayed jobs (pending)
+redis-cli ZRANGE bull:abandoned-cart-triggers:delayed 0 -1 WITHSCORES
+
+# Check completed jobs
+redis-cli LRANGE bull:abandoned-cart-triggers:completed 0 -1
+
+# Check failed jobs
+redis-cli LRANGE bull:abandoned-cart-triggers:failed 0 -1
+```
+
+---
+
 ## 11. Troubleshooting
 
 ### Common Issues
