@@ -58,8 +58,8 @@ export class TriggerService {
   ): Promise<TriggerEvaluationResult[]> {
     // Find all active flows with this trigger type
     const flows = await this.flowService.findActiveByTrigger(restaurantId, eventType);
+    log.debug({ restaurantId, eventType, flowsFound: flows.length }, 'Active flows found for trigger');
     if (flows.length === 0) {
-      log.debug({ restaurantId, eventType }, 'No active flows for trigger type');
       return [];
     }
 
@@ -163,10 +163,10 @@ export class TriggerService {
       // If orderTypes is configured but payload has none, allow through (don't block)
     }
 
-    // Check minimum order value
-    if (config.minOrderValue && typeof config.minOrderValue === 'number' && payload.orderTotal) {
-      if (payload.orderTotal < config.minOrderValue) {
-        log.info({ minRequired: config.minOrderValue, got: payload.orderTotal }, 'minOrderValue not met');
+    // Check minimum order total
+    if (config.minOrderTotal && typeof config.minOrderTotal === 'number' && payload.orderTotal) {
+      if (payload.orderTotal < config.minOrderTotal) {
+        log.info({ minRequired: config.minOrderTotal, got: payload.orderTotal }, 'minOrderTotal not met');
         return false;
       }
     }
