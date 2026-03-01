@@ -12,3 +12,4 @@ export { StoreHours, type IStoreHoursDocument } from './StoreHours.js';
 export { FinancialSettings, type IFinancialSettingsDocument } from './FinancialSettings.js';
 export { UserRestaurant, type IUserRestaurantDocument } from './UserRestaurant.js';
 export { RolePermissions, type IRolePermissionsDocument } from './RolePermissions.js';
+export { User, type IUserDocument } from './User.js';

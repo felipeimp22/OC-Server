@@ -55,6 +55,64 @@ export class FlowEngineService {
   }
 
   /**
+   * Enroll a contact in a flow.
+   * Creates a FlowExecution starting at the trigger node, then kicks off
+   * DAG processing via processCurrentNode().
+   *
+   * @param restaurantId - Tenant ID
+   * @param flowId - Flow to enroll in
+   * @param contactId - Contact to enroll
+   * @param context - Initial execution context (e.g. order data)
+   */
+  async enrollContact(
+    restaurantId: string,
+    flowId: string,
+    contactId: string,
+    context: Record<string, unknown> = {},
+  ): Promise<void> {
+    log.info({ restaurantId, flowId, contactId }, 'Enrolling contact in flow');
+
+    // Load flow to find trigger node
+    const flow = await this.flowRepo.findById(restaurantId, flowId);
+    if (!flow) {
+      log.warn({ restaurantId, flowId }, 'enrollContact: Flow not found');
+      return;
+    }
+
+    // Find trigger node (currentNodeId starts here)
+    const triggerNode = flow.nodes.find((n) => n.type === 'trigger');
+    if (!triggerNode) {
+      log.warn({ flowId }, 'enrollContact: No trigger node in flow');
+      return;
+    }
+
+    // Anti-spam: skip if already actively enrolled
+    const alreadyEnrolled = await this.executionRepo.isContactEnrolled(restaurantId, flowId, contactId);
+    if (alreadyEnrolled) {
+      log.debug({ flowId, contactId }, 'Contact already enrolled — skipping');
+      return;
+    }
+
+    // Create execution record
+    const execution = await this.executionRepo.create({
+      flowId,
+      restaurantId,
+      contactId,
+      status: 'active',
+      currentNodeId: triggerNode.id,
+      context,
+    } as any);
+
+    // Increment enrollment stats
+    await this.flowRepo.incrementEnrollments(flowId);
+
+    log.info({ restaurantId, flowId, contactId, executionId: execution._id }, 'Contact enrolled in flow');
+
+    // Begin DAG traversal
+    await this.processCurrentNode(execution._id.toString());
+  }
+
+  /**
    * Process the current node for a flow execution.
    * This is the main entry point called by Kafka consumers when
    * a `flow.step.ready` event is received.
@@ -62,8 +120,8 @@ export class FlowEngineService {
    * @param executionId - The flow execution ID
    */
   async processCurrentNode(executionId: string): Promise<void> {
-    // 1. Load execution
-    const execution = await this.executionRepo.findOne('', { _id: executionId } as any);
+    // 1. Load execution (tenant-free lookup — executionId is the primary key here)
+    const execution = await this.executionRepo.findByExecutionId(executionId);
     if (!execution) {
       log.warn({ executionId }, 'Execution not found');
       return;
@@ -160,8 +218,9 @@ export class FlowEngineService {
       }
 
       case 'condition': {
+        const triggerNode = flow.nodes.find((n) => n.type === 'trigger') ?? node;
         const conditionResult: ConditionResult = this.conditionService.evaluate(
-          node, contact, context,
+          node, triggerNode, contact, context,
         );
         await this.logNodeExecution(
           execution, node, 'success',
@@ -173,14 +232,12 @@ export class FlowEngineService {
       }
 
       case 'timer': {
-        // Get restaurant timezone
-        const timezone = (context._timezone as string) ?? 'UTC';
-
-        const targetDate = await this.timerService.scheduleTimer(
-          node, contact, executionId, timezone,
+        const timerResult = await this.timerService.scheduleTimer(
+          node, executionId, restaurantId,
         );
 
-        if (targetDate) {
+        if (timerResult) {
+          const { targetDate } = timerResult;
           await this.logNodeExecution(
             execution, node, 'success',
             `Timer scheduled for ${targetDate.toISOString()}`,
@@ -196,7 +253,9 @@ export class FlowEngineService {
       }
 
       case 'logic': {
-        await this.processLogicNode(execution, flow, node, contact, context);
+        log.error({ executionId, nodeId: node.id }, 'Legacy logic node encountered — completing execution');
+        await this.logNodeExecution(execution, node, 'skipped', 'Legacy logic node type not supported');
+        await this.completeExecution(execution);
         break;
       }
 
@@ -204,61 +263,6 @@ export class FlowEngineService {
         log.warn({ nodeType: node.type }, 'Unknown node type');
         await this.logNodeExecution(execution, node, 'skipped', `Unknown node type: ${node.type}`);
         await this.advanceToNext(execution, flow, node, null);
-    }
-  }
-
-  /**
-   * Process a logic node (stop, loop, until_condition, smart_date_sequence, etc.).
-   */
-  private async processLogicNode(
-    execution: IFlowExecutionDocument,
-    flow: IFlowDocument,
-    node: IFlowNode,
-    contact: IContactDocument,
-    context: Record<string, unknown>,
-  ): Promise<void> {
-    switch (node.subType) {
-      case 'stop': {
-        await this.logNodeExecution(execution, node, 'success', 'Flow stopped');
-        await this.completeExecution(execution);
-        break;
-      }
-
-      case 'loop': {
-        const maxIterations = (node.config.maxIterations as number) ?? 10;
-        const iterationKey = `_loop_${node.id}`;
-        const currentIteration = ((context[iterationKey] as number) ?? 0) + 1;
-
-        if (currentIteration > maxIterations) {
-          await this.logNodeExecution(execution, node, 'success', `Loop completed after ${maxIterations} iterations`);
-          await this.advanceToNext(execution, flow, node, null);
-        } else {
-          await this.executionRepo.advanceToNode(execution._id.toString(), node.id, {
-            [iterationKey]: currentIteration,
-          });
-          await this.logNodeExecution(execution, node, 'success', `Loop iteration ${currentIteration}/${maxIterations}`);
-          // Re-enter the loop body (advance to next)
-          await this.advanceToNext(execution, flow, node, 'loop_body');
-        }
-        break;
-      }
-
-      case 'until_condition': {
-        const condResult = this.conditionService.evaluate(node, contact, context);
-        if (condResult.handle === 'yes') {
-          await this.logNodeExecution(execution, node, 'success', 'Until condition met — advancing');
-          await this.advanceToNext(execution, flow, node, 'met');
-        } else {
-          await this.logNodeExecution(execution, node, 'success', 'Until condition not met — looping');
-          await this.advanceToNext(execution, flow, node, 'not_met');
-        }
-        break;
-      }
-
-      default: {
-        await this.logNodeExecution(execution, node, 'success', `Logic node: ${node.subType}`);
-        await this.advanceToNext(execution, flow, node, null);
-      }
     }
   }
 

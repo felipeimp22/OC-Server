@@ -58,8 +58,8 @@ export class TriggerService {
   ): Promise<TriggerEvaluationResult[]> {
     // Find all active flows with this trigger type
     const flows = await this.flowService.findActiveByTrigger(restaurantId, eventType);
+    log.debug({ restaurantId, eventType, flowsFound: flows.length }, 'Active flows found for trigger');
     if (flows.length === 0) {
-      log.debug({ restaurantId, eventType }, 'No active flows for trigger type');
       return [];
     }
 
@@ -100,6 +100,19 @@ export class TriggerService {
     if (!this.checkTriggerConditions(triggerNode, payload)) {
       log.info({ flowId, contactId, config: triggerNode.config, payloadStatus: payload.paymentStatus ?? payload.newStatus }, 'Trigger conditions not met');
       return { flowId, flowName: flow.name, enrolled: false, reason: 'Trigger conditions not met' };
+    }
+
+    // Order-level dedup: for order_completed and new_order, check if this order was already processed for this flow
+    if ((eventType === 'order_completed' || eventType === 'new_order') && payload.orderId) {
+      const alreadyProcessed = await this.executionRepo.hasOrderBeenProcessedForFlow(
+        restaurantId,
+        flowId,
+        payload.orderId as string,
+      );
+      if (alreadyProcessed) {
+        log.info({ flowId, contactId, orderId: payload.orderId }, 'Order already processed for this flow — skipping');
+        return { flowId, flowName: flow.name, enrolled: false, reason: 'Order already processed for this flow' };
+      }
     }
 
     // Anti-spam: check if already enrolled
@@ -163,10 +176,10 @@ export class TriggerService {
       // If orderTypes is configured but payload has none, allow through (don't block)
     }
 
-    // Check minimum order value
-    if (config.minOrderValue && typeof config.minOrderValue === 'number' && payload.orderTotal) {
-      if (payload.orderTotal < config.minOrderValue) {
-        log.info({ minRequired: config.minOrderValue, got: payload.orderTotal }, 'minOrderValue not met');
+    // Check minimum order total
+    if (config.minOrderTotal && typeof config.minOrderTotal === 'number' && payload.orderTotal) {
+      if (payload.orderTotal < config.minOrderTotal) {
+        log.info({ minRequired: config.minOrderTotal, got: payload.orderTotal }, 'minOrderTotal not met');
         return false;
       }
     }
@@ -179,6 +192,18 @@ export class TriggerService {
         log.info(
           { configStatus: config.paymentStatus, payloadStatus: rawPaymentStatus, normalizedConfig, normalizedPayload },
           'paymentStatus mismatch after normalization',
+        );
+        return false;
+      }
+    }
+
+    // Check targetStatus filter (order_status_changed trigger — fire only for configured status)
+    if (config.targetStatus && typeof config.targetStatus === 'string' && config.targetStatus !== '') {
+      const actualStatus = (payload.newStatus ?? (payload as any).status) as string | undefined;
+      if (actualStatus && config.targetStatus !== actualStatus) {
+        log.info(
+          { configuredStatus: config.targetStatus, actualStatus, reason: 'targetStatus mismatch' },
+          'targetStatus mismatch',
         );
         return false;
       }

@@ -44,15 +44,19 @@ export class ContactRepository extends BaseRepository<IContactDocument> {
   /**
    * Upsert a contact by customerId. Used for syncing from OrderChop Customer.
    * Creates if not found, updates if already exists.
+   *
+   * @param onInsertData - Extra fields applied only on document creation (via $setOnInsert).
+   *                       Use for fields that should default on new contacts but not be overwritten on updates.
    */
   async upsertByCustomerId(
     restaurantId: Types.ObjectId | string,
     customerId: Types.ObjectId | string,
     data: Partial<IContactDocument>,
+    onInsertData?: Partial<IContactDocument>,
   ): Promise<IContactDocument> {
     const result = await this.model.findOneAndUpdate(
       { restaurantId, customerId } as FilterQuery<IContactDocument>,
-      { $set: data, $setOnInsert: { restaurantId, customerId } },
+      { $set: data, $setOnInsert: { restaurantId, customerId, ...onInsertData } },
       { new: true, upsert: true },
     ).exec();
     return result!;
@@ -127,6 +131,7 @@ export class ContactRepository extends BaseRepository<IContactDocument> {
 
   /**
    * Find inactive contacts (no order in X days).
+   * Excludes contacts with no orders (lastOrderAt is null).
    * Used by the InactivityChecker scheduler.
    */
   async findInactive(
@@ -137,8 +142,7 @@ export class ContactRepository extends BaseRepository<IContactDocument> {
     cutoffDate.setDate(cutoffDate.getDate() - daysSinceLastOrder);
 
     return this.find(restaurantId, {
-      lastOrderAt: { $lt: cutoffDate },
-      lifecycleStatus: { $nin: ['lead', 'lost'] },
+      lastOrderAt: { $ne: null, $lt: cutoffDate },
     } as FilterQuery<IContactDocument>);
   }
 
@@ -175,6 +179,7 @@ export class ContactRepository extends BaseRepository<IContactDocument> {
   /**
    * Get segment counts (contacts per lifecycle status).
    * Used for the analytics dashboard.
+   * Always returns all 6 lifecycle statuses, defaulting to 0 if none exist.
    */
   async getSegmentCounts(
     restaurantId: Types.ObjectId | string,
@@ -184,7 +189,14 @@ export class ContactRepository extends BaseRepository<IContactDocument> {
       { $group: { _id: '$lifecycleStatus', count: { $sum: 1 } } },
     ]).exec();
 
-    const segments: Record<string, number> = {};
+    const segments: Record<string, number> = {
+      lead: 0,
+      first_time: 0,
+      returning: 0,
+      lost: 0,
+      recovered: 0,
+      VIP: 0,
+    };
     for (const r of results) {
       segments[r._id as string] = r.count;
     }

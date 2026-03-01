@@ -64,11 +64,10 @@ export class ReviewRequestScheduler {
 
         // Load restaurant for context
         const restaurant = await Restaurant.findById(restaurantId).lean().exec();
-        const context = buildContext(
+        const context = await buildContext(
           contact.toObject ? contact.toObject() : contact,
-          (restaurant ?? {}) as Record<string, unknown>,
-          null,
           { review_link: request.reviewUrl },
+          (restaurant ?? {}) as Record<string, unknown>,
         );
 
         if (request.channel === 'sms' && contact.phone) {
@@ -84,7 +83,7 @@ export class ReviewRequestScheduler {
           await this.commService.sendEmail({
             restaurantId,
             contactId,
-            to: contact.email,
+            to: [contact.email],
             subject: `How was your order from {{restaurant_name}}?`,
             body: `Hi {{first_name}}, we hope you enjoyed your order! Please leave us a review: {{review_link}}`,
             context,

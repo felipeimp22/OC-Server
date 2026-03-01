@@ -14,6 +14,9 @@ import { FlowRepository } from '../repositories/FlowRepository.js';
 import type { IFlowDocument } from '../domain/models/crm/Flow.js';
 import type { IPaginationOptions, IPaginatedResult } from '../domain/interfaces/IRepository.js';
 import { createLogger } from '../config/logger.js';
+import { validateFlowGraph, FlowValidationError } from '../lib/flowValidation.js';
+
+export { FlowValidationError };
 
 const log = createLogger('FlowService');
 
@@ -109,13 +112,10 @@ export class FlowService {
       throw new Error('Cannot activate an archived flow');
     }
 
-    // Validate flow has at least one trigger and one downstream node
-    const hasTrigger = flow.nodes.some((n) => n.type === 'trigger');
-    if (!hasTrigger) {
-      throw new Error('Flow must have at least one trigger node');
-    }
-    if (flow.nodes.length < 2) {
-      throw new Error('Flow must have at least two nodes');
+    // Validate graph structure
+    const validation = validateFlowGraph(flow.nodes, flow.edges ?? []);
+    if (!validation.valid) {
+      throw new FlowValidationError(validation.rule, validation.message);
     }
 
     const updated = await this.flowRepo.updateById(restaurantId, flowId, {

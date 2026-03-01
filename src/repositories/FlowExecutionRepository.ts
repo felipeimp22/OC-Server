@@ -139,24 +139,51 @@ export class FlowExecutionRepository extends BaseRepository<IFlowExecutionDocume
   }
 
   /**
-   * Mark execution as errored.
+   * Mark execution as errored, storing metadata in the errorMetadata field.
    */
   async markError(
     id: Types.ObjectId | string,
-    errorContext?: Record<string, unknown>,
+    metadata?: Record<string, unknown>,
   ): Promise<IFlowExecutionDocument | null> {
-    const update: Record<string, unknown> = {
-      status: 'error',
-      completedAt: new Date(),
-      nextExecutionAt: null,
-    };
-    if (errorContext) {
-      for (const [key, value] of Object.entries(errorContext)) {
-        update[`context.${key}`] = value;
-      }
-    }
+    return this.model.findByIdAndUpdate(
+      id,
+      {
+        $set: {
+          status: 'error',
+          completedAt: new Date(),
+          nextExecutionAt: null,
+          errorMetadata: metadata ?? null,
+        },
+      },
+      { new: true },
+    ).exec();
+  }
 
-    return this.model.findByIdAndUpdate(id, { $set: update }, { new: true }).exec();
+  /**
+   * Load a flow execution by ID without restaurantId tenancy check.
+   * Used internally by FlowTimerProcessor where restaurantId is not known upfront.
+   */
+  async findByExecutionId(id: Types.ObjectId | string): Promise<IFlowExecutionDocument | null> {
+    return this.model.findById(id).exec();
+  }
+
+  /**
+   * Check if an order has already been processed for a specific flow.
+   * Queries crm_flow_executions for documents matching { restaurantId, flowId, 'context.orderId': orderId }
+   * with NO status filter — counts active, completed, stopped, and error executions.
+   * Used to prevent duplicate flow enrollments for the same order.
+   */
+  async hasOrderBeenProcessedForFlow(
+    restaurantId: string,
+    flowId: string,
+    orderId: string,
+  ): Promise<boolean> {
+    const count = await this.model.countDocuments({
+      restaurantId,
+      flowId,
+      'context.orderId': orderId,
+    } as FilterQuery<IFlowExecutionDocument>).exec();
+    return count > 0;
   }
 
   /**

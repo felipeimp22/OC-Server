@@ -12,9 +12,9 @@
 
 import { v4 as uuidv4 } from 'uuid';
 import { getEmailProvider } from '../factories/EmailProviderFactory.js';
-import { getSMSProvider } from '../factories/SMSProviderFactory.js';
 import { TemplateRepository } from '../repositories/TemplateRepository.js';
 import { CommunicationLogRepository } from '../repositories/CommunicationLogRepository.js';
+import { ContactRepository } from '../repositories/ContactRepository.js';
 import { LinkTrackingRepository } from '../repositories/LinkTrackingRepository.js';
 import type { ICommunicationLogDocument } from '../domain/models/crm/CommunicationLog.js';
 import { interpolate, type InterpolationContext } from '../utils/variableInterpolator.js';
@@ -28,7 +28,8 @@ const log = createLogger('CommunicationService');
 export interface SendEmailParams {
   restaurantId: string;
   contactId: string;
-  to: string;
+  /** Resolved recipient email addresses */
+  to: string[];
   templateId?: string;
   subject?: string;
   body?: string;
@@ -52,21 +53,74 @@ export interface SendSMSParams {
 export class CommunicationService {
   private readonly templateRepo: TemplateRepository;
   private readonly commLogRepo: CommunicationLogRepository;
+  private readonly contactRepo: ContactRepository;
   private readonly linkTrackingRepo: LinkTrackingRepository;
 
   constructor() {
     this.templateRepo = new TemplateRepository();
     this.commLogRepo = new CommunicationLogRepository();
+    this.contactRepo = new ContactRepository();
     this.linkTrackingRepo = new LinkTrackingRepository();
   }
 
   /**
-   * Send an email to a contact.
+   * Interpolate template variables in a string.
+   * Exported as a static method for use by WebhookService and other services.
    *
-   * @param params - Email parameters
+   * @param template - Template string with {{variable}} or {{object.field}} placeholders
+   * @param context - Interpolation context (flat or nested)
+   * @returns Interpolated string
+   */
+  static interpolate(template: string, context: InterpolationContext): string {
+    return interpolate(template, context);
+  }
+
+  /**
+   * Send an email to one or more recipients.
+   *
+   * @param params - Email parameters including resolved to[] addresses
    * @returns The communication log record
    */
   async sendEmail(params: SendEmailParams): Promise<ICommunicationLogDocument> {
+    // Validate recipients
+    const validTo = params.to.filter(Boolean);
+    if (validTo.length === 0) {
+      log.info({ contactId: params.contactId }, 'No email recipients — skipping send');
+      return this.commLogRepo.create({
+        restaurantId: params.restaurantId,
+        contactId: params.contactId,
+        channel: 'email',
+        templateId: params.templateId ?? null,
+        flowId: params.flowId ?? null,
+        executionId: params.executionId ?? null,
+        to: '',
+        subject: params.subject ?? '',
+        status: 'skipped',
+        reason: 'no_email',
+        sentAt: new Date(),
+      } as any);
+    }
+
+    // Check email opt-in status
+    const contact = await this.contactRepo.findById(params.restaurantId, params.contactId);
+    log.debug({ contactId: params.contactId, emailOptIn: contact?.emailOptIn }, 'Email opt-in check');
+    if (contact && contact.emailOptIn === false) {
+      log.info({ contactId: params.contactId }, 'Contact opted out — skipping email send');
+      return this.commLogRepo.create({
+        restaurantId: params.restaurantId,
+        contactId: params.contactId,
+        channel: 'email',
+        templateId: params.templateId ?? null,
+        flowId: params.flowId ?? null,
+        executionId: params.executionId ?? null,
+        to: validTo.join(', '),
+        subject: params.subject ?? '',
+        status: 'skipped',
+        reason: 'opted_out',
+        sentAt: new Date(),
+      } as any);
+    }
+
     let subject = params.subject ?? '';
     let body = params.body ?? '';
 
@@ -79,9 +133,11 @@ export class CommunicationService {
       }
     }
 
-    // Interpolate variables
+    // Interpolate variables (supports {{customer.first_name}} dot-notation)
     subject = interpolate(subject, params.context);
     body = interpolate(body, params.context);
+
+    const toStr = validTo.join(', ');
 
     // Create communication log (queued)
     const commLog = await this.commLogRepo.create({
@@ -91,19 +147,21 @@ export class CommunicationService {
       templateId: params.templateId ?? null,
       flowId: params.flowId ?? null,
       executionId: params.executionId ?? null,
-      to: params.to,
+      to: toStr,
       subject,
       status: 'queued',
       sentAt: new Date(),
     } as any);
 
-    // Send via provider with retry
+    log.debug({ to: toStr, subject, bodyLength: body.length }, 'Sending CRM email');
+
+    // Send via provider with retry (max 3 attempts)
     try {
       const provider = getEmailProvider();
       const result = await withRetry(
         () =>
           provider.sendEmail({
-            to: params.to,
+            to: validTo,
             from: env.EMAIL_FROM_ADDRESS ?? `noreply@${env.EMAIL_DOMAIN}`,
             subject,
             html: body,
@@ -121,10 +179,11 @@ export class CommunicationService {
           $set: { providerMessageId: result.messageId },
         });
       }
-      log.info({ to: params.to, messageId: result.messageId }, 'Email sent');
+      log.info({ contactId: params.contactId, to: toStr, subject }, 'CRM email sent successfully');
     } catch (err) {
+      const errorMessage = (err as Error).message;
       await this.commLogRepo.updateStatus(commLog._id, 'failed');
-      log.error({ err, to: params.to }, 'Email send failed after retries');
+      log.error({ contactId: params.contactId, to: toStr, subject, error: errorMessage }, 'CRM email send failed');
     }
 
     return commLog;
@@ -132,23 +191,11 @@ export class CommunicationService {
 
   /**
    * Send an SMS to a contact.
+   * Currently a stub — logs skipped with reason 'sms_stub'. No real send occurs.
    */
   async sendSMS(params: SendSMSParams): Promise<ICommunicationLogDocument> {
-    let body = params.body ?? '';
-
-    // Load template if specified
-    if (params.templateId) {
-      const template = await this.templateRepo.findById(params.restaurantId, params.templateId);
-      if (template) {
-        body = template.body ?? body;
-      }
-    }
-
-    // Interpolate variables
-    body = interpolate(body, params.context);
-
-    // Create communication log
-    const commLog = await this.commLogRepo.create({
+    log.info({ contactId: params.contactId, to: params.to }, 'SMS send stubbed — skipping');
+    return this.commLogRepo.create({
       restaurantId: params.restaurantId,
       contactId: params.contactId,
       channel: 'sms',
@@ -157,39 +204,10 @@ export class CommunicationService {
       executionId: params.executionId ?? null,
       to: params.to,
       subject: null,
-      status: 'queued',
+      status: 'skipped',
+      reason: 'sms_stub',
       sentAt: new Date(),
     } as any);
-
-    // Send via provider with retry
-    try {
-      const provider = getSMSProvider();
-      const result = await withRetry(
-        () =>
-          provider.sendSMS({
-            to: params.to,
-            body,
-            metadata: {
-              communicationLogId: commLog._id.toString(),
-              contactId: params.contactId,
-            },
-          }),
-        { maxAttempts: 3, operationName: 'send_sms' },
-      );
-
-      await this.commLogRepo.updateStatus(commLog._id, 'sent');
-      if (result.messageId) {
-        await this.commLogRepo.updateById(params.restaurantId, commLog._id.toString(), {
-          $set: { providerMessageId: result.messageId },
-        });
-      }
-      log.info({ to: params.to, messageId: result.messageId }, 'SMS sent');
-    } catch (err) {
-      await this.commLogRepo.updateStatus(commLog._id, 'failed');
-      log.error({ err, to: params.to }, 'SMS send failed after retries');
-    }
-
-    return commLog;
   }
 
   /**

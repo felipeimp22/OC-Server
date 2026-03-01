@@ -15,7 +15,7 @@ export async function analyticsRoutes(app: FastifyInstance): Promise<void> {
 
   // GET /api/v1/analytics/overview
   app.get('/overview', async (request: FastifyRequest) => {
-    return analyticsService.getOverview(request.restaurantId);
+    return analyticsService.getDashboardOverview(request.restaurantId);
   });
 
   // GET /api/v1/analytics/flows/:id

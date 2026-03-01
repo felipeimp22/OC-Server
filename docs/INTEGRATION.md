@@ -1,6 +1,6 @@
 # Integration Guide
 
-## Connecting to oc-crm-engine from oc-webapp
+## Connecting to oc-server (CRM Engine) from oc-restaurant-manager
 
 ### Authentication
 
@@ -17,14 +17,32 @@ const headers = {
 ### Base URL
 
 ```
-Development: http://localhost:4000/api
-Production:  https://crm.orderchop.com/api  (or your deployment URL)
+Development: http://localhost:3001
+Production:  Set via CRM_ENGINE_URL environment variable
+```
+
+In `oc-restaurant-manager`, the base URL is configured via `CRM_ENGINE_URL`:
+
+```env
+CRM_ENGINE_URL=http://localhost:3001
+```
+
+### Node Format (IFlowNode)
+
+Nodes sent to the API must use **IFlowNode format** — `subType` at the top level, not inside `data`. The React Flow canvas uses a different in-browser format; the frontend transformation layer (`useFlowBuilderStore.ts` → `fromReactFlowNodes`) converts between them before saving.
+
+```typescript
+// CORRECT — subType at top level
+{ id: 'trigger-1', type: 'trigger', subType: 'order_completed', label: '...', config: {}, position: {...} }
+
+// WRONG — subType nested in data (React Flow format — never send this to API)
+{ id: 'trigger-1', type: 'trigger', position: {...}, data: { subType: 'order_completed', ... } }
 ```
 
 ### Example: Creating a Flow
 
 ```typescript
-const response = await fetch(`${CRM_BASE_URL}/api/flows`, {
+const response = await fetch(`${process.env.CRM_ENGINE_URL}/api/v1/flows`, {
   method: 'POST',
   headers,
   body: JSON.stringify({
@@ -52,7 +70,11 @@ const response = await fetch(`${CRM_BASE_URL}/api/flows`, {
         type: 'action',
         subType: 'send_email',
         label: 'Thank You Email',
-        config: { templateId: '<template-id>' },
+        config: {
+          recipients: [{ type: 'customer' }],
+          subject: 'Thanks for your order, {{customer.first_name}}!',
+          body: 'Hi {{customer.first_name}}, your order #{{order.number}} is on its way!',
+        },
         position: { x: 100, y: 400 },
       },
     ],
@@ -74,9 +96,10 @@ const params = new URLSearchParams({
   order: 'desc',
 });
 
-const response = await fetch(`${CRM_BASE_URL}/api/contacts?${params}`, {
-  headers,
-});
+const response = await fetch(
+  `${process.env.CRM_ENGINE_URL}/api/v1/contacts?${params}`,
+  { headers },
+);
 
 const { data, total, page, limit, totalPages, hasMore } = await response.json();
 ```
@@ -84,8 +107,8 @@ const { data, total, page, limit, totalPages, hasMore } = await response.json();
 ### Example: Updating a Contact
 
 ```typescript
-await fetch(`${CRM_BASE_URL}/api/contacts/${contactId}`, {
-  method: 'PATCH',
+await fetch(`${process.env.CRM_ENGINE_URL}/api/v1/contacts/${contactId}`, {
+  method: 'PUT',
   headers,
   body: JSON.stringify({
     customFields: {
@@ -97,86 +120,159 @@ await fetch(`${CRM_BASE_URL}/api/contacts/${contactId}`, {
 });
 ```
 
-## Kafka Event Format
+---
 
-Events published to Kafka by the main oc-server should follow this format:
+## Kafka Event Bridge
+
+Events from `oc-restaurant-manager` reach oc-server's Kafka pipeline via an HTTP bridge using the **Transactional Outbox pattern**.
+
+### Flow
+
+```
+oc-restaurant-manager
+  1. publishEvent(restaurantId, eventType, payload)
+     → writes CRMEvent record to Prisma outbox (status: 'pending')
+  2. deliverEvent() POSTs to oc-server /api/v1/events/ingest
+     → system JWT signed with AUTH_SECRET
+  3. On success: outbox status → 'delivered'
+     On failure: outbox status → 'failed' (retry cron picks up)
+
+oc-server /api/v1/events/ingest
+  4. Validates system JWT (no X-Restaurant-Id tenancy check — restaurantId in payload)
+  5. Routes eventType to correct Kafka topic:
+     - order.*      → orderchop.orders
+     - payment.*    → orderchop.payments
+     - customer.*   → orderchop.customers
+     - cart.*       → orderchop.carts
+  6. Returns { ok: true } or { ok: false, error: '...' }
+
+Retry path (oc-restaurant-manager)
+  - GET /api/cron/crm-events runs every minute
+  - retryPendingEvents() re-attempts failed/pending outbox events
+  - Max 5 attempts; after that → status: 'dead_letter'
+```
+
+### Event Message Schema
+
+All events sent to the `/api/v1/events/ingest` endpoint follow this shape:
 
 ```typescript
-interface OrderEvent {
-  eventId: string;      // UUID — used for idempotency
-  eventType: string;    // e.g., 'order_completed', 'order_status_changed'
-  restaurantId: string; // MongoDB ObjectId as string
-  customerId: string;   // MongoDB ObjectId as string
-  orderId?: string;
-  data: {
-    // Event-specific payload
-    total?: number;
-    orderNumber?: string;
-    orderType?: string;
-    status?: string;
-    previousStatus?: string;
-    // ... additional fields
+interface KafkaEvent {
+  eventId: string;      // UUID — used for idempotency (deduplication)
+  eventType: string;    // e.g., 'order.completed', 'customer.created'
+  payload: {
+    restaurantId: string; // MongoDB ObjectId string (required)
+    customerId?: string;  // MongoDB ObjectId string
+    [key: string]: unknown; // Event-specific data
   };
-  timestamp: string;    // ISO 8601
 }
 ```
 
+### Kafka Topic Routing
+
+| eventType prefix | Kafka Topic |
+|-----------------|-------------|
+| `order.*` | `orderchop.orders` |
+| `payment.*` | `orderchop.payments` |
+| `customer.*` | `orderchop.customers` |
+| `cart.*` | `orderchop.carts` |
+
 ### Required Kafka Topics
 
-Ensure these topics exist in your Kafka cluster:
+All 8 topics are auto-created by `ensureTopics()` on startup (`ENABLE_KAFKA=true`):
 
 | Topic | Producer | Consumer |
 |-------|----------|----------|
-| `order-events` | oc-server | oc-crm-engine |
-| `customer-events` | oc-server | oc-crm-engine |
-| `cart-events` | oc-server | oc-crm-engine |
-| `crm-events` | oc-crm-engine | oc-crm-engine |
+| `orderchop.orders` | oc-restaurant-manager (via bridge) | oc-server |
+| `orderchop.payments` | oc-restaurant-manager (via bridge) | oc-server |
+| `orderchop.customers` | oc-restaurant-manager (via bridge) | oc-server |
+| `orderchop.carts` | oc-restaurant-manager (via bridge) | oc-server |
+| `crm.flow.execute` | oc-server | oc-server (CRMEventConsumer — flow.step.ready only) |
+| `crm.flow.timer` | oc-server | oc-server |
+| `crm.communications` | oc-server | oc-server |
+| `crm.notifications` | oc-server | oc-restaurant-manager |
 
-## Template Variables
+---
 
-Available variables for email/SMS templates:
+## Trigger-Scoped Variables
 
-### Contact Variables
-| Variable | Description |
-|----------|-------------|
-| `{{first_name}}` | Contact's first name |
-| `{{last_name}}` | Contact's last name |
-| `{{email}}` | Contact's email |
-| `{{phone}}` | Contact's phone |
-| `{{lifecycle_status}}` | Current lifecycle status |
-| `{{total_orders}}` | Total order count |
-| `{{lifetime_value}}` | Total spend |
+Email/SMS inline composers use `{{dot.notation}}` variables scoped to the trigger type. All triggers include universal variables:
 
-### Restaurant Variables
-| Variable | Description |
-|----------|-------------|
-| `{{restaurant_name}}` | Restaurant name |
-| `{{restaurant_phone}}` | Restaurant phone |
-| `{{restaurant_email}}` | Restaurant email |
+### Universal Variables (all triggers)
+| Variable | Description | Resolution |
+|----------|-------------|------------|
+| `{{customer.first_name}}` | Contact's first name | `contact.firstName`; falls back to first token of `payload.customerName` |
+| `{{customer.last_name}}` | Contact's last name | `contact.lastName`; falls back to remaining tokens of `payload.customerName` (e.g. `'John Smith Jr'` → `'Smith Jr'`) |
+| `{{customer.email}}` | Contact's email | `contact.email` |
+| `{{customer.phone}}` | Contact's phone | `contact.phone` (object `{countryCode, number}` or plain string); falls back to `payload.customerPhone` |
+| `{{restaurant.name}}` | Restaurant name | `restaurant.name` |
+| `{{restaurant.phone}}` | Restaurant phone | `restaurant.phone` |
 
-### Order Variables (when triggered by order events)
-| Variable | Description |
-|----------|-------------|
-| `{{order_total}}` | Order total amount |
-| `{{order_number}}` | Order number |
-| `{{order_type}}` | delivery/pickup/dine-in |
-| `{{order_date}}` | Order date |
+> **Backwards-compat alias:** `{{restaurant.owner_name}}` is silently rewritten to `{{restaurant.name}}` before interpolation, so old saved flow templates continue to render correctly. The variable is no longer shown in the variable picker.
 
-### Special Variables
-| Variable | Description |
-|----------|-------------|
-| `{{review_link}}` | Auto-generated review link |
-| `{{promo_code}}` | Promotional code |
-| `{{unsubscribe_link}}` | Unsubscribe URL |
+### Trigger-Specific Variables
 
-### Custom Fields
-Any custom field defined for the restaurant is available as `{{field_key}}`.
+| Trigger | Additional Variables |
+|---------|---------------------|
+| `new_order` (fires on payment.succeeded — uses upsertFromEvent for first-time customers, does NOT increment stats) | `{{order.total}}`, `{{order.number}}`, `{{payment.method}}` |
+| `order_completed` (fires once on first qualifying fulfillment status: ready, out_for_delivery, delivered, completed), `first_order`, `nth_order` | `{{order.total}}`, `{{order.number}}`, `{{order.items_summary}}`, `{{order.date}}` |
+| `payment_failed` | `{{order.total}}`, `{{order.number}}`, `{{payment.failure_reason}}` |
+| `order_status_changed` (supports `config.targetStatus` filter — if set, fires only when `newStatus` matches; if empty/unset, fires on every status change) | `{{order.number}}`, `{{order.status}}` |
+| `abandoned_cart` | `{{cart.items_summary}}`, `{{cart.total}}`, `{{cart.abandon_time}}` |
+| `no_order_in_x_days` | `{{customer.last_order_date}}`, `{{customer.days_since_order}}` |
+
+#### Variable Resolution Notes
+
+- **`order.items_summary`**: Kafka events do not include order items. When `payload.items` is empty but `payload.orderId` exists, `buildContext()` performs an async DB lookup (`Order.findById(orderId)`) to fetch items and format them as `"2x Burger, 1x Fries"`.
+- **`customer.last_name`**: If `contact.lastName` is empty (e.g., single-word name, or ContactService hasn't split the name yet), `buildContext()` splits `payload.customerName` by whitespace — first token → `first_name`, remaining tokens → `last_name`.
+- **`customer.phone`**: Accepts both `{ countryCode, number }` object (from Contact model) and plain string (from Kafka `customerPhone` field). Falls back to `payload.customerPhone` when contact has no phone.
+- **`buildContext()` is async** — callers must `await` it (ActionService, ReviewRequestScheduler).
+
+Unknown variables are replaced with an empty string.
+
+---
+
+## Trigger Config Keys
+
+Each trigger node stores its configuration in `node.config`. The backend reads these keys when evaluating triggers.
+
+| Trigger | Config Key | Type | Default | Backend Reader |
+|---------|-----------|------|---------|----------------|
+| `order_completed` | `minOrderTotal` | `number` | — | `TriggerService.checkTriggerConditions()` |
+| `nth_order` | `n` | `number` | 5 | `TriggerService.checkTriggerConditions()` |
+| `no_order_in_x_days` | `days` | `number` | 30 | `InactivityChecker.ts` (line ~72) |
+| `order_status_changed` | `targetStatus` | `string` | — (any) | `TriggerService.checkTriggerConditions()` |
+| `payment_failed` | — | — | — | — |
+| `abandoned_cart` | `delayDays` | `number` | 1 | `CartEventConsumer.handleCartAbandoned()` — schedules BullMQ delayed job with `delayDays * 86400000` ms delay (1–90 days) |
+| `first_order` | — | — | — | — |
+| `new_order` | — | — | — | — |
+
+---
+
+## Timer Node Independence
+
+Timer nodes (`delay` and `date_field`) within a flow are **independent of the trigger type**. They use the `flow-timers` BullMQ queue, which is entirely separate from trigger-specific mechanisms like the `abandoned-cart-triggers` queue or the `InactivityChecker` cron.
+
+This means a flow like:
+
+```
+Abandoned Cart (delayDays: 1) → Delay (2 hours) → Send Email
+```
+
+involves two separate delay mechanisms:
+
+1. **Trigger delay** (`abandoned-cart-triggers` queue): 1 day wait before enrollment — configured via `config.delayDays`
+2. **Timer node delay** (`flow-timers` queue): 2 hour wait during execution — configured via `config.duration` + `config.unit`
+
+Total time from cart abandonment to email: ~26 hours. The two delays are independent and use different BullMQ queues.
+
+---
 
 ## Docker Deployment
 
 ```bash
 # Build the image
-docker build -t oc-crm-engine .
+docker build -t oc-server .
 
 # Run with docker-compose
 docker-compose up -d

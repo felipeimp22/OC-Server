@@ -29,6 +29,57 @@ export class ContactService {
   }
 
   /**
+   * Upsert a contact from a customer event (customer.created / customer.updated).
+   * Sets lifecycleStatus: 'lead' only on creation, never overwrites it on updates.
+   *
+   * @param restaurantId - Tenant ID
+   * @param customerData - Data from the customer event payload
+   * @returns The upserted CRM contact
+   */
+  async upsertFromCustomer(
+    restaurantId: string,
+    customerData: {
+      customerId: string;
+      name: string;
+      email: string;
+      phone?: { countryCode: string; number: string } | null;
+    },
+  ): Promise<IContactDocument> {
+    const [firstName, ...lastParts] = customerData.name.split(' ');
+    const lastName = lastParts.join(' ');
+
+    const contact = await this.contactRepo.upsertByCustomerId(
+      restaurantId,
+      customerData.customerId,
+      {
+        email: customerData.email,
+        firstName: firstName ?? '',
+        lastName,
+        phone: customerData.phone ?? null,
+      } as Partial<IContactDocument>,
+      { lifecycleStatus: 'lead' } as Partial<IContactDocument>,
+    );
+
+    log.info(
+      { restaurantId, contactId: contact._id, customerId: customerData.customerId },
+      'Contact upserted from customer event',
+    );
+
+    return contact;
+  }
+
+  /**
+   * Find a contact by their OrderChop customer ID.
+   * Returns null if not found or if wrong tenant.
+   */
+  async findByCustomerId(
+    restaurantId: string,
+    customerId: string,
+  ): Promise<IContactDocument | null> {
+    return this.contactRepo.findByCustomerId(restaurantId, customerId);
+  }
+
+  /**
    * Sync a contact from an OrderChop Customer event.
    * Creates or updates the CRM contact with data from the Customer collection.
    *
@@ -65,6 +116,42 @@ export class ContactService {
     );
 
     return contact;
+  }
+
+  /**
+   * Upsert a contact from an order event payload.
+   * Creates the contact if they do not yet exist in the CRM.
+   *
+   * @param restaurantId - Tenant ID
+   * @param payload - Order event payload (must contain customerId; optionally name/email)
+   * @returns The upserted CRM contact
+   */
+  async upsertFromEvent(
+    restaurantId: string,
+    payload: { customerId: string; name?: string; email?: string },
+  ): Promise<IContactDocument> {
+    const data: Partial<IContactDocument> = {};
+    if (payload.name) {
+      const [firstName, ...lastParts] = payload.name.split(' ');
+      data.firstName = firstName ?? '';
+      data.lastName = lastParts.join(' ');
+    }
+    if (payload.email) data.email = payload.email;
+
+    const contact = await this.contactRepo.upsertByCustomerId(restaurantId, payload.customerId, data);
+    log.info({ restaurantId, contactId: contact._id, customerId: payload.customerId }, 'Contact upserted from event');
+    return contact;
+  }
+
+  /**
+   * Increment order stats after a completed order.
+   */
+  async incrementOrderStats(
+    restaurantId: string,
+    contactId: string,
+    orderTotal: number,
+  ): Promise<IContactDocument | null> {
+    return this.recordOrder(restaurantId, contactId, orderTotal);
   }
 
   /**

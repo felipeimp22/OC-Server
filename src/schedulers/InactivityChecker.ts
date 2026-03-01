@@ -1,7 +1,7 @@
 /**
  * @fileoverview Inactivity Checker — cron job that enrolls inactive contacts in flows.
  *
- * Runs: every hour
+ * Runs: once per day at 08:00 (default cron: 0 8 * * *)
  *
  * For each active flow with a "no_order_in_x_days" trigger, queries contacts
  * where lastOrderAt < (now - X days) and enrolls them if not already enrolled.
@@ -12,7 +12,9 @@
 import cron from 'node-cron';
 import { FlowRepository } from '../repositories/FlowRepository.js';
 import { ContactRepository } from '../repositories/ContactRepository.js';
+import { FlowExecutionRepository } from '../repositories/FlowExecutionRepository.js';
 import { TriggerService } from '../services/TriggerService.js';
+import { timezoneService } from '../services/TimezoneService.js';
 import { Restaurant } from '../domain/models/external/Restaurant.js';
 import { createLogger } from '../config/logger.js';
 
@@ -22,17 +24,19 @@ export class InactivityChecker {
   private task: cron.ScheduledTask | null = null;
   private readonly flowRepo: FlowRepository;
   private readonly contactRepo: ContactRepository;
+  private readonly executionRepo: FlowExecutionRepository;
   private readonly triggerService: TriggerService;
 
   constructor() {
     this.flowRepo = new FlowRepository();
     this.contactRepo = new ContactRepository();
+    this.executionRepo = new FlowExecutionRepository();
     this.triggerService = new TriggerService();
   }
 
   start(): void {
-    // Every hour
-    this.task = cron.schedule('0 * * * *', async () => {
+    // Once per day at 08:00
+    this.task = cron.schedule('0 8 * * *', async () => {
       try {
         await this.run();
       } catch (err) {
@@ -40,7 +44,7 @@ export class InactivityChecker {
       }
     });
 
-    log.info('Inactivity checker scheduled (every hour)');
+    log.info('Inactivity checker scheduled (daily at 08:00)');
   }
 
   async run(): Promise<void> {
@@ -53,10 +57,13 @@ export class InactivityChecker {
       const restaurantId = restaurant._id.toString();
 
       try {
+        const timezone = await timezoneService.getTimezone(restaurantId);
+
         // Find active flows with no_order_in_x_days trigger
         const flows = await this.flowRepo.findActiveByTrigger(restaurantId, 'no_order_in_x_days');
 
         for (const flow of flows) {
+          const flowId = flow._id.toString();
           const triggerNode = flow.nodes.find(
             (n) => n.type === 'trigger' && n.subType === 'no_order_in_x_days',
           );
@@ -67,10 +74,20 @@ export class InactivityChecker {
 
           let enrolledCount = 0;
           for (const contact of inactiveContacts) {
+            const contactId = contact._id.toString();
+
+            // Skip already-enrolled contacts
+            const alreadyEnrolled = await this.executionRepo.isContactEnrolled(
+              restaurantId,
+              flowId,
+              contactId,
+            );
+            if (alreadyEnrolled) continue;
+
             const results = await this.triggerService.evaluateTriggers(
               restaurantId,
               'no_order_in_x_days',
-              contact._id.toString(),
+              contactId,
               { days, lastOrderAt: contact.lastOrderAt },
             );
             if (results.some((r) => r.enrolled)) {
@@ -80,7 +97,7 @@ export class InactivityChecker {
 
           if (enrolledCount > 0) {
             log.info(
-              { restaurantId, flowId: flow._id, enrolledCount },
+              { restaurantId, flowId, enrolledCount, timezone },
               'Inactive contacts enrolled',
             );
           }

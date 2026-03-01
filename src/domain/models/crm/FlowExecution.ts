@@ -42,6 +42,8 @@ export interface IFlowExecutionDocument extends Document {
    * @example { orderId: "...", orderTotal: 45.99, branchResults: { node_3: "yes" } }
    */
   context: Record<string, unknown>;
+  /** Error metadata set when execution enters error state */
+  errorMetadata: Record<string, unknown> | null;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -61,6 +63,7 @@ const FlowExecutionSchema = new Schema<IFlowExecutionDocument>(
     completedAt: { type: Date, default: null },
     nextExecutionAt: { type: Date, default: null },
     context: { type: Schema.Types.Mixed, default: {} },
+    errorMetadata: { type: Schema.Types.Mixed, default: null },
   },
   {
     collection: 'crm_flow_executions',

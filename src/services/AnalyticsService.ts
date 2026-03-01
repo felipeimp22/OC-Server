@@ -7,7 +7,6 @@
 import { ContactRepository } from '../repositories/ContactRepository.js';
 import { FlowExecutionLogRepository } from '../repositories/FlowExecutionLogRepository.js';
 import { CommunicationLogRepository } from '../repositories/CommunicationLogRepository.js';
-import { FlowExecutionRepository } from '../repositories/FlowExecutionRepository.js';
 import { FlowRepository } from '../repositories/FlowRepository.js';
 
 export interface DashboardOverview {
@@ -23,27 +22,25 @@ export class AnalyticsService {
   private readonly contactRepo: ContactRepository;
   private readonly logRepo: FlowExecutionLogRepository;
   private readonly commLogRepo: CommunicationLogRepository;
-  private readonly executionRepo: FlowExecutionRepository;
   private readonly flowRepo: FlowRepository;
 
   constructor() {
     this.contactRepo = new ContactRepository();
     this.logRepo = new FlowExecutionLogRepository();
     this.commLogRepo = new CommunicationLogRepository();
-    this.executionRepo = new FlowExecutionRepository();
     this.flowRepo = new FlowRepository();
   }
 
   /**
    * Get dashboard overview for a restaurant.
    */
-  async getOverview(restaurantId: string): Promise<DashboardOverview> {
+  async getDashboardOverview(restaurantId: string): Promise<DashboardOverview> {
     const [totalContacts, newContactsThisMonth, segments, messagingStats, totalEnrollments, activeFlows] = await Promise.all([
       this.contactRepo.count(restaurantId),
       this.contactRepo.countNewThisMonth(restaurantId),
       this.contactRepo.getSegmentCounts(restaurantId),
       this.commLogRepo.getMessagingStats(restaurantId),
-      this.executionRepo.count(restaurantId),
+      this.flowRepo.sumEnrollments(restaurantId),
       this.flowRepo.countActive(restaurantId),
     ]);
 
@@ -61,7 +58,7 @@ export class AnalyticsService {
    * Get per-flow node analytics.
    */
   async getFlowAnalytics(flowId: string) {
-    return this.logRepo.getNodeAnalytics(flowId);
+    return this.logRepo.getNodeStats(flowId);
   }
 
   /**

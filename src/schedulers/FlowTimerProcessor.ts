@@ -63,7 +63,7 @@ export class FlowTimerProcessor {
     log.info({ executionId, nodeId }, 'Timer fired — resuming flow execution');
 
     // Load execution and verify it's still active
-    const execution = await this.executionRepo.findOne('', { _id: executionId } as any);
+    const execution = await this.executionRepo.findByExecutionId(executionId);
     if (!execution) {
       log.warn({ executionId }, 'Execution not found — timer job abandoned');
       return;

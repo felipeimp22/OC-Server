@@ -1,10 +1,9 @@
 /**
- * @fileoverview CRM Internal Event Consumer — handles internal CRM events.
+ * @fileoverview CRM Internal Event Consumer — handles internal CRM flow execution events.
  *
- * Topics: crm.flow.execute, crm.contacts
+ * Topics: crm.flow.execute
  *
- * These are produced by the CRM engine itself to chain flow steps and
- * propagate contact changes that may trigger other flows.
+ * Produced by the CRM engine itself to chain flow steps.
  *
  * @module kafka/consumers/CRMEventConsumer
  */
@@ -13,7 +12,6 @@ import type { EachMessagePayload } from 'kafkajs';
 import { createConsumer } from '../../config/kafka.js';
 import { KAFKA_TOPICS } from '../topics.js';
 import { FlowEngineService } from '../../services/FlowEngineService.js';
-import { TriggerService } from '../../services/TriggerService.js';
 import { createLogger } from '../../config/logger.js';
 
 const log = createLogger('CRMEventConsumer');
@@ -21,18 +19,16 @@ const log = createLogger('CRMEventConsumer');
 export class CRMEventConsumer {
   private consumer: ReturnType<typeof createConsumer> | null = null;
   private readonly flowEngine: FlowEngineService;
-  private readonly triggerService: TriggerService;
 
   constructor() {
     this.flowEngine = new FlowEngineService();
-    this.triggerService = new TriggerService();
   }
 
   async start(): Promise<void> {
     this.consumer = createConsumer({ groupId: 'crm-internal-consumer' });
     await this.consumer.connect();
     await this.consumer.subscribe({
-      topics: [KAFKA_TOPICS.CRM_FLOW_EXECUTE, KAFKA_TOPICS.CRM_CONTACTS],
+      topics: [KAFKA_TOPICS.CRM_FLOW_EXECUTE],
       fromBeginning: false,
     });
 
@@ -53,8 +49,6 @@ export class CRMEventConsumer {
 
       if (topic === KAFKA_TOPICS.CRM_FLOW_EXECUTE) {
         await this.handleFlowExecute(event);
-      } else if (topic === KAFKA_TOPICS.CRM_CONTACTS) {
-        await this.handleContactEvent(event);
       }
     } catch (err) {
       log.error({ err, topic }, 'Error processing internal CRM event');
@@ -62,7 +56,7 @@ export class CRMEventConsumer {
   }
 
   /**
-   * Handle flow.step.ready and flow.timer.expired events.
+   * Handle flow.step.ready events.
    */
   private async handleFlowExecute(event: Record<string, unknown>): Promise<void> {
     const eventType = event.eventType as string;
@@ -77,50 +71,11 @@ export class CRMEventConsumer {
 
     switch (eventType) {
       case 'flow.step.ready':
-      case 'flow.timer.expired':
         await this.flowEngine.processCurrentNode(executionId);
         break;
 
       default:
         log.debug({ eventType }, 'Unhandled flow execute event type');
-    }
-  }
-
-  /**
-   * Handle internal contact events (tag applied, field changed, lifecycle changed).
-   * These can trigger other flows.
-   */
-  private async handleContactEvent(event: Record<string, unknown>): Promise<void> {
-    const eventType = event.eventType as string;
-    const payload = event.payload as Record<string, unknown>;
-
-    if (!payload) return;
-
-    const restaurantId = payload.restaurantId as string;
-    const contactId = payload.contactId as string;
-
-    if (!restaurantId || !contactId) return;
-
-    log.debug({ eventType, contactId }, 'Processing internal contact event');
-
-    // Map internal event types to trigger types
-    let triggerType: string | null = null;
-    switch (eventType) {
-      case 'contact.tag_applied':
-        triggerType = 'tag_applied';
-        break;
-      case 'contact.tag_removed':
-        triggerType = 'tag_removed';
-        break;
-      case 'contact.lifecycle_changed':
-        triggerType = 'lifecycle_changed';
-        break;
-      default:
-        return; // Not a triggerable event
-    }
-
-    if (triggerType) {
-      await this.triggerService.evaluateTriggers(restaurantId, triggerType, contactId, payload);
     }
   }
 

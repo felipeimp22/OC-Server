@@ -9,5 +9,5 @@ export { produceContactEvent, produceNotification } from './producers/CRMEventPr
 export { produceFlowStepReady, produceFlowTimerExpired } from './producers/FlowEventProducer.js';
 export { OrderEventConsumer } from './consumers/OrderEventConsumer.js';
 export { CustomerEventConsumer } from './consumers/CustomerEventConsumer.js';
-export { CartEventConsumer } from './consumers/CartEventConsumer.js';
+export { CartEventConsumer, abandonedCartQueue, ABANDONED_CART_QUEUE } from './consumers/CartEventConsumer.js';
 export { CRMEventConsumer } from './consumers/CRMEventConsumer.js';

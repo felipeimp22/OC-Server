@@ -160,9 +160,10 @@ describe('FlowService', () => {
         _id: 'f1',
         status: 'draft',
         nodes: [
-          { id: 'n1', type: 'trigger' },
-          { id: 'n2', type: 'action' },
+          { id: 'n1', type: 'trigger', subType: 'order_completed', label: '', config: {}, position: { x: 0, y: 0 } },
+          { id: 'n2', type: 'action', subType: 'send_email', label: '', config: {}, position: { x: 0, y: 0 } },
         ],
+        edges: [],
       };
       mockFlowRepo.findById.mockResolvedValue(flow);
       mockFlowRepo.updateById.mockResolvedValue({ ...flow, status: 'active' });
@@ -187,26 +188,16 @@ describe('FlowService', () => {
         .rejects.toThrow('Cannot activate an archived flow');
     });
 
-    it('should throw when flow has no trigger node', async () => {
+    it('should throw FlowValidationError when flow has no trigger node', async () => {
       mockFlowRepo.findById.mockResolvedValue({
         _id: 'f1',
         status: 'draft',
-        nodes: [{ id: 'n1', type: 'action' }],
+        nodes: [{ id: 'n1', type: 'action', subType: 'send_email', label: '', config: {}, position: { x: 0, y: 0 } }],
+        edges: [],
       });
 
       await expect(service.activate('rest-1', 'f1'))
-        .rejects.toThrow('Flow must have at least one trigger node');
-    });
-
-    it('should throw when flow has less than 2 nodes', async () => {
-      mockFlowRepo.findById.mockResolvedValue({
-        _id: 'f1',
-        status: 'draft',
-        nodes: [{ id: 'n1', type: 'trigger' }],
-      });
-
-      await expect(service.activate('rest-1', 'f1'))
-        .rejects.toThrow('Flow must have at least two nodes');
+        .rejects.toThrow('trigger node');
     });
 
     it('should return null for non-existent flow', async () => {

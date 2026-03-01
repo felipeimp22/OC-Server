@@ -7,6 +7,7 @@
 import type { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
 import { ContactService } from '../../services/ContactService.js';
 import { FlowExecutionLogRepository } from '../../repositories/FlowExecutionLogRepository.js';
+import type { IContactDocument } from '../../domain/models/crm/Contact.js';
 import {
   updateContactBody,
   applyTagsBody,
@@ -58,8 +59,17 @@ export async function contactRoutes(app: FastifyInstance): Promise<void> {
   // PUT /api/v1/contacts/:id — Update contact
   app.put('/:id', async (request: FastifyRequest, reply: FastifyReply) => {
     const { id } = idParam.parse(request.params);
-    const body = updateContactBody.parse(request.body);
-    const contact = await contactService.update(request.restaurantId, id, body);
+    const { customFields, ...rest } = updateContactBody.parse(request.body);
+
+    // Expand customFields into dot-notation keys so MongoDB merges rather than replaces
+    const setFields: Record<string, unknown> = { ...rest };
+    if (customFields) {
+      for (const [key, value] of Object.entries(customFields)) {
+        setFields[`customFields.${key}`] = value;
+      }
+    }
+
+    const contact = await contactService.update(request.restaurantId, id, setFields as Partial<IContactDocument>);
     if (!contact) return reply.code(404).send({ error: 'Contact not found' });
     return contact;
   });

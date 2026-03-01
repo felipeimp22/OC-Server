@@ -9,6 +9,8 @@
 /** All trigger subtypes for flow trigger nodes */
 export const TriggerType = {
   // ── OrderChop Triggers ──────────────────────────────────
+  /** Fires when a new order is placed and payment is confirmed */
+  NEW_ORDER: 'new_order',
   /** Fires when a new order is created */
   ORDER_CREATED: 'order_created',
   /** Fires when an order is confirmed (payment received) */

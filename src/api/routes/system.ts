@@ -11,6 +11,7 @@ import { CommunicationService } from '../../services/CommunicationService.js';
 import { Customer } from '../../domain/models/external/Customer.js';
 import { env } from '../../config/env.js';
 import { createLogger } from '../../config/logger.js';
+import { KAFKA_TOPICS } from '../../kafka/topics.js';
 
 const log = createLogger('SystemRoutes');
 
@@ -29,7 +30,13 @@ export async function systemRoutes(app: FastifyInstance): Promise<void> {
 
   // GET /api/v1/system/kafka-status
   app.get('/system/kafka-status', async () => {
-    return { status: 'ok', message: 'Kafka consumer groups running' };
+    if (!env.ENABLE_KAFKA) {
+      return { enabled: false };
+    }
+    return {
+      enabled: true,
+      topics: Object.values(KAFKA_TOPICS),
+    };
   });
 
   // POST /api/v1/system/sync-contacts — Force sync contacts from OrderChop
@@ -42,7 +49,7 @@ export async function systemRoutes(app: FastifyInstance): Promise<void> {
     let synced = 0;
     for (const customer of customers) {
       try {
-        await contactService.syncFromCustomer(restaurantId, {
+        await contactService.upsertFromCustomer(restaurantId, {
           customerId: customer._id.toString(),
           name: customer.name ?? '',
           email: customer.email ?? '',
@@ -78,7 +85,7 @@ export async function systemRoutes(app: FastifyInstance): Promise<void> {
       const result = await commService.sendEmail({
         restaurantId: request.restaurantId,
         contactId: 'test-manual',
-        to,
+        to: [to],
         subject: subject ?? 'CRM Engine Test Email',
         body: body ?? '<h1>It works!</h1><p>This is a test email from oc-crm-engine.</p>',
         context: { first_name: 'Test', restaurant_name: 'OrderChop' },

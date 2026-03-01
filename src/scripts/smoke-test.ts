@@ -1,7 +1,7 @@
 /**
- * @fileoverview End-to-End Pipeline Smoke Test (US-023)
+ * @fileoverview End-to-End Pipeline Smoke Test (US-024)
  *
- * Automates all acceptance criteria for US-023:
+ * Automates all acceptance criteria for US-024:
  * - sync-contacts, tag creation, flow creation + activation
  * - Kafka event publishing (order.completed)
  * - Flow execution verification (within 5 seconds)
@@ -454,7 +454,7 @@ async function testSeedScript(): Promise<void> {
 
 async function main(): Promise<void> {
   console.log('═'.repeat(60));
-  console.log('  OrderChop CRM Engine — End-to-End Smoke Test (US-023)');
+  console.log('  OrderChop CRM Engine — End-to-End Smoke Test (US-024)');
   console.log('═'.repeat(60));
   console.log(`  CRM URL:       ${CRM_URL}`);
   console.log(`  Restaurant ID: ${RESTAURANT_ID}`);
