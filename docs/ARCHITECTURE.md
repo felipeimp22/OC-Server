@@ -363,6 +363,32 @@ payment.succeeded → handleNewOrder()
 - **`tryProcessEvent`** prevents double stats increment across two Kafka event paths (order.status_changed + order.completed both fire when status='completed')
 - **`hasOrderBeenProcessedForFlow`** prevents per-flow re-enrollment across multiple qualifying status changes (ready → delivered → completed all qualify) and ensures one new_order fire per order per flow
 
+## Payment Status Enforcement
+
+All order-related triggers require confirmed payment (`paymentStatus === 'paid'` or `paymentStatus === 'succeeded'`) before any trigger conditions are evaluated. This is a **universal guard** at the top of `TriggerService.checkTriggerConditions()` — it runs before orderTypes, minOrderTotal, and targetStatuses checks.
+
+### Triggers Requiring Payment
+
+| Trigger | Payment Required | Notes |
+|---------|-----------------|-------|
+| `order_completed` | Yes | Fires on fulfillment statuses — payment must be confirmed |
+| `first_order` | Yes | Same path as order_completed |
+| `nth_order` | Yes | Same path as order_completed |
+| `item_ordered` | Yes | Same path as order_completed |
+| `item_ordered_x_times` | Yes | Same path as order_completed |
+| `new_order` | Yes | Fires on payment.succeeded — paymentStatus will be 'succeeded' |
+| `order_status_changed` | Yes | Status changes for unpaid orders should NOT trigger CRM flows |
+| `abandoned_cart` | **Exempt** | Inherently targets pending/unpaid orders |
+| `no_order_in_x_days` | **Exempt** | Cron-based, no order context in payload |
+
+### Payment Status Normalization
+
+Stripe sends `'succeeded'` via webhook; the internal order system uses `'paid'`. The guard accepts **both** values with simple string comparison (`!== 'paid' && !== 'succeeded'`). Any other value (e.g., `'pending'`, `'failed'`, `undefined`) blocks the trigger.
+
+### Performance Benefit
+
+The payment guard runs at the **top** of `checkTriggerConditions()`, before expensive checks like item matching (`item_ordered`) or DB aggregations (`item_ordered_x_times`). Unpaid orders are rejected immediately without querying MongoDB.
+
 ## Target Status Filtering
 
 Triggers can optionally restrict which order statuses they fire on using `config.targetStatuses: string[]`. This is a **generic check** in `TriggerService.checkTriggerConditions()` — it runs for any trigger that has `targetStatuses` set, not just a specific trigger type.

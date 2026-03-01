@@ -233,6 +233,12 @@ Unknown variables are replaced with an empty string.
 
 ---
 
+## Payment Status Enforcement
+
+> **Important:** All order-related triggers (`order_completed`, `first_order`, `nth_order`, `item_ordered`, `item_ordered_x_times`, `new_order`, `order_status_changed`) require `paymentStatus` to be `'paid'` or `'succeeded'` in the event payload. If payment is not confirmed, the trigger is silently skipped. Exempt triggers: `abandoned_cart` (targets unpaid orders) and `no_order_in_x_days` (cron-based, no order context).
+>
+> Ensure your event payloads include `paymentStatus` when publishing order-related events.
+
 ## Trigger Config Keys
 
 Each trigger node stores its configuration in `node.config`. The backend reads these keys when evaluating triggers.

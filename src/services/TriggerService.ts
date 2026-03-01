@@ -169,6 +169,23 @@ export class TriggerService {
       'Checking trigger conditions',
     );
 
+    // Universal payment guard — all order-related triggers require confirmed payment.
+    // Exempt: abandoned_cart (pending orders), no_order_in_x_days (cron-based, no order context).
+    const PAYMENT_REQUIRED_TRIGGERS = [
+      'order_completed', 'first_order', 'nth_order', 'item_ordered',
+      'item_ordered_x_times', 'new_order', 'order_status_changed',
+    ];
+    if (PAYMENT_REQUIRED_TRIGGERS.includes(triggerNode.subType)) {
+      const paymentStatus = payload.paymentStatus as string | undefined;
+      if (paymentStatus !== 'paid' && paymentStatus !== 'succeeded') {
+        log.info(
+          { subType: triggerNode.subType, paymentStatus },
+          `Skipping trigger: payment not confirmed (paymentStatus=${paymentStatus})`,
+        );
+        return false;
+      }
+    }
+
     // Check orderTypes filter
     if (config.orderTypes && Array.isArray(config.orderTypes) && config.orderTypes.length > 0) {
       if (payload.orderType && !config.orderTypes.includes(payload.orderType)) {
