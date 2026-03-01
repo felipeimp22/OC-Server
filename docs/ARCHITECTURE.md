@@ -296,11 +296,39 @@ payment.succeeded → handleNewOrder()
 - **`tryProcessEvent`** prevents double stats increment across two Kafka event paths (order.status_changed + order.completed both fire when status='completed')
 - **`hasOrderBeenProcessedForFlow`** prevents per-flow re-enrollment across multiple qualifying status changes (ready → delivered → completed all qualify) and ensures one new_order fire per order per flow
 
-## Abandoned Cart Delayed Triggers
+## Time-Based Trigger Architecture
+
+The CRM engine uses three distinct time-based mechanisms. Understanding which mechanism applies where is critical to avoid confusion.
+
+### Overview
+
+| Mechanism | Trigger | When It Runs | Queue / Scheduler | Config |
+|-----------|---------|-------------|-------------------|--------|
+| BullMQ delayed job (pre-enrollment) | `abandoned_cart` | Before flow enrollment — delays the trigger itself | `abandoned-cart-triggers` queue | `config.delayDays` (1–90 days) |
+| Cron job (daily scan) | `no_order_in_x_days` | Daily at 08:00 — scans contacts for inactivity | `InactivityChecker` (node-cron) | `config.days` (integer, min 1) |
+| BullMQ delayed job (during execution) | Any trigger | During flow execution — pauses at timer nodes | `flow-timers` queue | `config.duration`/`unit` or `config.targetDateUtc` |
+
+### Timer Node Independence
+
+Timer nodes (`delay` and `date_field`) within a flow are **completely independent** of the trigger type. The `FlowEngineService.processCurrentNode()` method handles timer nodes by calling `TimerService.scheduleTimer(node, executionId, restaurantId)` — no trigger information is passed or consulted.
+
+This means timer nodes work identically whether the flow was started by `order_completed`, `abandoned_cart`, `no_order_in_x_days`, or any other trigger.
+
+**Example — combined delays:**
+```
+Abandoned Cart (delayDays: 1) → [enrollment after 1 day] → Delay node (2 hours) → Send Email
+= ~26 hours total from cart abandonment to email
+```
+
+The trigger delay (BullMQ `abandoned-cart-triggers` queue, pre-enrollment) and the timer node delay (BullMQ `flow-timers` queue, during execution) are **separate queues and mechanisms**:
+- Trigger delay decides *when to enroll* the contact
+- Timer node delay decides *when to execute the next step* within an already-enrolled flow
+
+### 1. Abandoned Cart — BullMQ Delayed Jobs (Pre-Enrollment)
 
 The `abandoned_cart` trigger uses **BullMQ delayed jobs** instead of immediate trigger evaluation. This allows restaurant owners to configure a delay (1–90 days) before the flow fires, giving customers time to complete their order.
 
-### Architecture
+#### Flow
 
 ```
 cart.abandoned Kafka event
@@ -317,7 +345,7 @@ cart.abandoned Kafka event
       → If completed: skip (customer already ordered)
 ```
 
-### BullMQ Queue: `abandoned-cart-triggers`
+#### BullMQ Queue: `abandoned-cart-triggers`
 
 - **Queue instance**: Singleton exported from `CartEventConsumer.ts` as `abandonedCartQueue`
 - **Job name**: `abandoned-cart-trigger`
@@ -326,7 +354,7 @@ cart.abandoned Kafka event
 - **Delay**: `delayDays * 86400000` ms (configurable per-flow, 1–90 days)
 - **Cleanup**: `removeOnComplete: true`, `removeOnFail: 100`
 
-### Cancellation (Order Completion)
+#### Cancellation (Order Completion)
 
 When an order is completed or paid, `OrderEventConsumer.cancelAbandonedCartJobs()` removes all pending BullMQ jobs for that orderId. Two entry points trigger cancellation:
 
@@ -343,7 +371,7 @@ order completed/paid
 
 Cancellation is scoped per-orderId — it never touches other customers' jobs or other flow types. If cancellation fails (e.g., Redis unavailable), the AbandonedCartProcessor's order status check provides defense-in-depth by skipping completed orders at processing time.
 
-### AbandonedCartProcessor (Worker)
+#### AbandonedCartProcessor (Worker)
 
 `src/schedulers/AbandonedCartProcessor.ts` — BullMQ Worker that processes delayed abandoned cart jobs.
 
@@ -363,10 +391,60 @@ Cancellation is scoped per-orderId — it never touches other customers' jobs or
 - Registered in `src/index.ts` alongside FlowTimerProcessor, guarded by `ENABLE_SCHEDULERS`
 - Graceful shutdown via `worker.close()` on SIGINT/SIGTERM
 
-### Key Design Decisions
+#### Design Decisions
 
 1. **Separate queue from flow-timers**: `abandoned-cart-triggers` is independent from `flow-timers` for separate scaling and monitoring
 2. **Contact upserted before scheduling**: Ensures contactId exists in job data when the job fires days later
 3. **Deterministic jobId**: Enables O(1) cancellation without needing to scan the queue
 4. **Per-flow scheduling**: Multiple flows with different `delayDays` are handled independently — each gets its own job
-5. **Order status check at processing time**: Even if cancellation (US-005) fails or a race condition occurs, the processor double-checks order status before triggering — defense in depth
+5. **Order status check at processing time**: Even if cancellation fails or a race condition occurs, the processor double-checks order status before triggering — defense in depth
+
+### 2. No Order in X Days — Daily Cron Scan
+
+The `no_order_in_x_days` trigger uses a **daily cron job** (`InactivityChecker`) to scan for contacts whose last order was more than `config.days` days ago.
+
+#### Flow
+
+```
+Daily cron (0 8 * * *) — InactivityChecker
+  → Find all active flows with no_order_in_x_days trigger
+  → For each flow:
+      → Read triggerNode.config.days (default 30)
+      → Query contacts where lastOrderAt < (now - days) and totalOrders > 0
+      → For each inactive contact: TriggerService.evaluateTriggers(...)
+```
+
+- **Config key**: `config.days` (integer, min 1) — set via TriggerConfigForm in the flow builder
+- **Scheduler**: `src/schedulers/InactivityChecker.ts`, guarded by `ENABLE_SCHEDULERS`
+- **No BullMQ queue** — uses node-cron for scheduling, not BullMQ
+
+### 3. Timer Nodes — BullMQ Delayed Jobs (During Execution)
+
+Timer nodes pause flow execution until a specified time. They fire **during** flow execution (after enrollment), regardless of what trigger started the flow.
+
+#### Flow
+
+```
+FlowEngineService.processCurrentNode() → case 'timer'
+  → TimerService.scheduleTimer(node, executionId, restaurantId)
+  → Calculate target date from config (delay duration or absolute date)
+  → Schedule BullMQ delayed job on 'flow-timers' queue
+  → Execution pauses
+  → FlowTimerProcessor picks up job when delay expires
+  → Calls FlowEngineService.resumeFromTimer() → advances to next node
+```
+
+#### BullMQ Queue: `flow-timers`
+
+- **Queue instance**: Singleton in `TimerService.ts`
+- **Job name**: `flow-timer`
+- **Job ID format**: `timer-${executionId}-${nodeId}`
+- **Job data**: `{ executionId, nodeId }`
+- **Delay**: Calculated from node config (duration-based or absolute date)
+
+#### Timer Subtypes
+
+| Subtype | Config | Calculation |
+|---------|--------|-------------|
+| `delay` | `{ duration: number, unit: 'minutes'\|'hours'\|'days' }` | `duration * unitMs` from now |
+| `date_field` | `{ targetDateUtc: string }` | Absolute UTC date/time (must be in the future) |

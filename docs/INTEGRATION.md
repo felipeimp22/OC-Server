@@ -249,6 +249,25 @@ Each trigger node stores its configuration in `node.config`. The backend reads t
 
 ---
 
+## Timer Node Independence
+
+Timer nodes (`delay` and `date_field`) within a flow are **independent of the trigger type**. They use the `flow-timers` BullMQ queue, which is entirely separate from trigger-specific mechanisms like the `abandoned-cart-triggers` queue or the `InactivityChecker` cron.
+
+This means a flow like:
+
+```
+Abandoned Cart (delayDays: 1) → Delay (2 hours) → Send Email
+```
+
+involves two separate delay mechanisms:
+
+1. **Trigger delay** (`abandoned-cart-triggers` queue): 1 day wait before enrollment — configured via `config.delayDays`
+2. **Timer node delay** (`flow-timers` queue): 2 hour wait during execution — configured via `config.duration` + `config.unit`
+
+Total time from cart abandonment to email: ~26 hours. The two delays are independent and use different BullMQ queues.
+
+---
+
 ## Docker Deployment
 
 ```bash
