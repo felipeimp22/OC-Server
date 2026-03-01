@@ -23,7 +23,7 @@ export class FlowValidationError extends Error {
 }
 
 /**
- * Validate a flow graph against the 9 structural rules.
+ * Validate a flow graph against the 10 structural rules.
  */
 export function validateFlowGraph(
   nodes: IFlowNode[],
@@ -184,6 +184,33 @@ export function validateFlowGraph(
       rule: 'R-9',
       message: `Flow exceeds maximum depth of 10 nodes (current depth: ${maxDepth}).`,
     };
+  }
+
+  // ── R-10: All non-trigger nodes must be reachable from trigger ──────
+  if (nodes.length > 1) {
+    const reachable = new Set<string>();
+    const queue = [triggerNode.id];
+    reachable.add(triggerNode.id);
+    while (queue.length > 0) {
+      const current = queue.shift()!;
+      for (const edge of outEdges.get(current) ?? []) {
+        if (!reachable.has(edge.targetNodeId)) {
+          reachable.add(edge.targetNodeId);
+          queue.push(edge.targetNodeId);
+        }
+      }
+    }
+    const orphanNodes = nodes.filter((n) => !reachable.has(n.id));
+    if (orphanNodes.length > 0) {
+      const orphanLabels = orphanNodes
+        .map((n) => n.label || n.subType || n.id)
+        .join(', ');
+      return {
+        valid: false,
+        rule: 'R-10',
+        message: `Unconnected nodes found: ${orphanLabels}. All nodes must be connected to the trigger.`,
+      };
+    }
   }
 
   return { valid: true };
