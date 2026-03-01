@@ -35,11 +35,12 @@ export class MailgunProvider implements IEmailProvider {
    */
   async sendEmail(options: IEmailOptions): Promise<IEmailSendResult> {
     const to = Array.isArray(options.to) ? options.to.join(', ') : options.to;
+    const subject = options.subject;
 
     const formData = new URLSearchParams();
     formData.append('from', options.from ?? 'noreply@orderchop.com');
     formData.append('to', to);
-    formData.append('subject', options.subject);
+    formData.append('subject', subject);
     formData.append('html', options.html);
 
     if (options.text) formData.append('text', options.text);
@@ -51,16 +52,30 @@ export class MailgunProvider implements IEmailProvider {
       }
     }
 
-    const response = await axios.post(`${this.baseUrl}/messages`, formData, {
-      auth: { username: 'api', password: this.apiKey },
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      timeout: 10_000,
-    });
+    try {
+      const response = await axios.post(`${this.baseUrl}/messages`, formData, {
+        auth: { username: 'api', password: this.apiKey },
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        timeout: 10_000,
+        validateStatus: (status) => status >= 200 && status < 300,
+      });
 
-    const messageId = response.data?.id ?? '';
-    log.info({ to, messageId }, 'Email sent via Mailgun');
+      const messageId = response.data?.id ?? '';
+      log.info({ to, messageId }, 'Email sent via Mailgun');
 
-    return { messageId, status: 'sent', timestamp: new Date() };
+      return { messageId, status: 'sent', timestamp: new Date() };
+    } catch (err) {
+      // Distinguish HTTP errors (non-2xx response) from network errors
+      const axiosErr = err as { response?: { status?: number; data?: unknown }; message?: string };
+      if (axiosErr.response) {
+        const statusCode = axiosErr.response.status;
+        const responseText = JSON.stringify(axiosErr.response.data ?? '');
+        log.error({ to, subject, statusCode, responseText }, 'Mailgun API error');
+      } else {
+        log.error({ to, subject, error: (err as Error).message }, 'Mailgun send threw exception');
+      }
+      throw err;
+    }
   }
 
   /**

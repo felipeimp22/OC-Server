@@ -70,6 +70,8 @@ export class FlowEngineService {
     contactId: string,
     context: Record<string, unknown> = {},
   ): Promise<void> {
+    log.info({ restaurantId, flowId, contactId }, 'Enrolling contact in flow');
+
     // Load flow to find trigger node
     const flow = await this.flowRepo.findById(restaurantId, flowId);
     if (!flow) {
