@@ -101,9 +101,6 @@ export class OrderEventConsumer {
           await this.handleNewOrder(payload, restaurantId);
           break;
 
-        case 'payment.failed':
-          await this.handlePaymentFailed(payload, restaurantId);
-          break;
 
         case 'payment.refunded':
           await this.handleOrderEvent('payment_refunded', payload, restaurantId);
@@ -304,39 +301,6 @@ export class OrderEventConsumer {
     if (orderId) {
       await this.cancelAbandonedCartJobs(restaurantId, orderId);
     }
-  }
-
-  /**
-   * Handle payment.failed — evaluate payment_failed triggers.
-   */
-  private async handlePaymentFailed(
-    payload: Record<string, unknown>,
-    eventRestaurantId?: string,
-  ): Promise<void> {
-    const restaurantId = (eventRestaurantId ?? payload.restaurantId) as string;
-    const customerId = payload.customerId as string;
-
-    if (!restaurantId || !customerId) {
-      log.warn({ restaurantId, customerId }, 'payment.failed missing restaurantId or customerId — skipping');
-      return;
-    }
-
-    const contact = await this.contactService.getByCustomerId(restaurantId, customerId);
-    if (!contact) {
-      log.warn({ restaurantId, customerId }, 'No contact found for payment.failed event — skipping');
-      return;
-    }
-
-    await this.triggerService.evaluateTriggers(restaurantId, 'payment_failed', contact._id.toString(), {
-      orderId: payload.orderId as string | undefined,
-      orderNumber: payload.orderNumber as string | undefined,
-      customerId,
-      customerEmail: payload.customerEmail as string | undefined,
-      customerName: payload.customerName as string | undefined,
-      orderTotal: payload.orderTotal as number | undefined,
-      paymentStatus: payload.paymentStatus as string | undefined,
-      failureReason: (payload.failureReason ?? payload.failure_reason) as string | undefined,
-    });
   }
 
   /**

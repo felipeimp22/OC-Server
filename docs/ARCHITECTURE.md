@@ -179,7 +179,7 @@ Flows are directed acyclic graphs (DAGs):
 
 | Type | Purpose | Sub-types |
 |------|---------|-----------|
-| Trigger | Entry point | 8 event types: new_order, order_completed, payment_failed, order_status_changed, abandoned_cart, first_order, nth_order, no_order_in_x_days. **new_order** fires on payment.succeeded (uses upsertFromEvent for first-time customers). **order_completed fires on fulfillment statuses** (ready, out_for_delivery, delivered, completed) — not just manual 'completed'. |
+| Trigger | Entry point | 7 event types: new_order, order_completed, order_status_changed, abandoned_cart, first_order, nth_order, no_order_in_x_days. **new_order** fires on payment.succeeded (uses upsertFromEvent for first-time customers). **order_completed fires on fulfillment statuses** (ready, out_for_delivery, delivered, completed) — not just manual 'completed'. |
 | Action | Execute task | 3 action types: send_email, send_sms, outgoing_webhook |
 | Condition | Branch logic | yes_no (trigger-bound — reads filter from trigger node config; no operator UI) |
 | Timer | Delay execution | delay, date_field |

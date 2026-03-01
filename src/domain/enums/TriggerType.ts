@@ -21,8 +21,6 @@ export const TriggerType = {
   ORDER_CANCELLED: 'order_cancelled',
   /** Fires when a payment succeeds */
   PAYMENT_SUCCEEDED: 'payment_succeeded',
-  /** Fires when a payment fails */
-  PAYMENT_FAILED: 'payment_failed',
   /** Fires when payment status changes (any transition) */
   PAYMENT_STATUS_CHANGED: 'payment_status_changed',
   /** Fires when order status changes (any transition) */
