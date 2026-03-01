@@ -295,3 +295,53 @@ payment.succeeded → handleNewOrder()
 
 - **`tryProcessEvent`** prevents double stats increment across two Kafka event paths (order.status_changed + order.completed both fire when status='completed')
 - **`hasOrderBeenProcessedForFlow`** prevents per-flow re-enrollment across multiple qualifying status changes (ready → delivered → completed all qualify) and ensures one new_order fire per order per flow
+
+## Abandoned Cart Delayed Triggers
+
+The `abandoned_cart` trigger uses **BullMQ delayed jobs** instead of immediate trigger evaluation. This allows restaurant owners to configure a delay (1–90 days) before the flow fires, giving customers time to complete their order.
+
+### Architecture
+
+```
+cart.abandoned Kafka event
+  → CartEventConsumer.handleCartAbandoned()
+  → upsertFromEvent() (ensure contact exists)
+  → FlowRepository.findActiveByTrigger(restaurantId, 'abandoned_cart')
+  → For each flow:
+      → Read triggerNode.config.delayDays (default 1, clamped 1–90)
+      → Schedule BullMQ delayed job on 'abandoned-cart-triggers' queue
+      → Job fires after delayDays * 86400000 ms
+  → AbandonedCartProcessor (Worker) picks up job:
+      → Check if order is still pending (not completed)
+      → If pending: evaluate abandoned_cart trigger → enroll in flow
+      → If completed: skip (customer already ordered)
+```
+
+### BullMQ Queue: `abandoned-cart-triggers`
+
+- **Queue instance**: Singleton exported from `CartEventConsumer.ts` as `abandonedCartQueue`
+- **Job name**: `abandoned-cart-trigger`
+- **Job ID format**: `abandoned-cart-${orderId}-${flowId}` (deterministic — enables O(1) cancellation)
+- **Job data**: `{ restaurantId, flowId, orderId, customerId, contactId, customerEmail, customerName, customerPhone, cartItems, cartTotal, abandonTime }`
+- **Delay**: `delayDays * 86400000` ms (configurable per-flow, 1–90 days)
+- **Cleanup**: `removeOnComplete: true`, `removeOnFail: 100`
+
+### Cancellation (Order Completion)
+
+When an order is completed or paid, `OrderEventConsumer` cancels all pending abandoned cart jobs for that orderId:
+
+```
+order completed/paid
+  → Find all active abandoned_cart flows
+  → For each flow: queue.remove('abandoned-cart-${orderId}-${flowId}')
+  → BullMQ Queue.remove() is a no-op if job doesn't exist (safe)
+```
+
+Cancellation is scoped per-orderId — it never touches other customers' jobs or other flow types.
+
+### Key Design Decisions
+
+1. **Separate queue from flow-timers**: `abandoned-cart-triggers` is independent from `flow-timers` for separate scaling and monitoring
+2. **Contact upserted before scheduling**: Ensures contactId exists in job data when the job fires days later
+3. **Deterministic jobId**: Enables O(1) cancellation without needing to scan the queue
+4. **Per-flow scheduling**: Multiple flows with different `delayDays` are handled independently — each gets its own job

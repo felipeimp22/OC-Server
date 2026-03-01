@@ -243,7 +243,7 @@ Each trigger node stores its configuration in `node.config`. The backend reads t
 | `no_order_in_x_days` | `days` | `number` | 30 | `InactivityChecker.ts` (line ~72) |
 | `order_status_changed` | `targetStatus` | `string` | — (any) | `TriggerService.checkTriggerConditions()` |
 | `payment_failed` | — | — | — | — |
-| `abandoned_cart` | — | — | — | — |
+| `abandoned_cart` | `delayDays` | `number` | 1 | `CartEventConsumer.handleCartAbandoned()` — schedules BullMQ delayed job with `delayDays * 86400000` ms delay (1–90 days) |
 | `first_order` | — | — | — | — |
 | `new_order` | — | — | — | — |
 

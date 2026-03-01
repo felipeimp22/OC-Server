@@ -41,6 +41,7 @@ import {
   CustomerEventConsumer,
   CartEventConsumer,
   CRMEventConsumer,
+  abandonedCartQueue,
 } from './kafka/index.js';
 import {
   FlowTimerProcessor,
@@ -140,6 +141,16 @@ async function main(): Promise<void> {
   await connectDatabase();
   log.info('MongoDB connected');
 
+  // Log email provider configuration for diagnostics
+  log.info(
+    {
+      emailProvider: process.env.EMAIL_PROVIDER,
+      emailDomain: process.env.EMAIL_DOMAIN,
+      emailFrom: process.env.EMAIL_FROM_ADDRESS,
+    },
+    'Email provider initialized',
+  );
+
   // 2. Build Fastify app
   const app = buildApp();
 
@@ -169,11 +180,20 @@ async function main(): Promise<void> {
     log.info('Kafka consumers started');
   }
 
-  // 5. Start BullMQ worker
+  // 5. Start BullMQ workers and queues
   const timerProcessor = new FlowTimerProcessor();
   if (env.ENABLE_SCHEDULERS) {
     timerProcessor.start();
     log.info('BullMQ flow timer processor started');
+
+    // Abandoned cart queue is initialized as a module-level singleton in CartEventConsumer.
+    // The queue (producer side) is ready when the module loads; the worker (AbandonedCartProcessor)
+    // will be registered in US-004.
+    if (abandonedCartQueue) {
+      log.info('Abandoned cart delayed trigger queue ready');
+    } else {
+      log.warn('Abandoned cart queue not available — Redis disabled');
+    }
   } else {
     log.info('BullMQ flow timer processor skipped (ENABLE_SCHEDULERS=false)');
   }
