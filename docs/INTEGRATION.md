@@ -27,6 +27,18 @@ In `oc-restaurant-manager`, the base URL is configured via `CRM_ENGINE_URL`:
 CRM_ENGINE_URL=http://localhost:3001
 ```
 
+### Node Format (IFlowNode)
+
+Nodes sent to the API must use **IFlowNode format** — `subType` at the top level, not inside `data`. The React Flow canvas uses a different in-browser format; the frontend transformation layer (`useFlowBuilderStore.ts` → `fromReactFlowNodes`) converts between them before saving.
+
+```typescript
+// CORRECT — subType at top level
+{ id: 'trigger-1', type: 'trigger', subType: 'order_completed', label: '...', config: {}, position: {...} }
+
+// WRONG — subType nested in data (React Flow format — never send this to API)
+{ id: 'trigger-1', type: 'trigger', position: {...}, data: { subType: 'order_completed', ... } }
+```
+
 ### Example: Creating a Flow
 
 ```typescript
@@ -201,7 +213,7 @@ Email/SMS inline composers use `{{dot.notation}}` variables scoped to the trigge
 
 | Trigger | Additional Variables |
 |---------|---------------------|
-| `order_completed`, `first_order`, `nth_order` | `{{order.total}}`, `{{order.number}}`, `{{order.items_summary}}`, `{{order.date}}` |
+| `order_completed` (fires once on first qualifying fulfillment status: ready, out_for_delivery, delivered, completed), `first_order`, `nth_order` | `{{order.total}}`, `{{order.number}}`, `{{order.items_summary}}`, `{{order.date}}` |
 | `payment_failed` | `{{order.total}}`, `{{order.number}}`, `{{payment.failure_reason}}` |
 | `order_status_changed` | `{{order.number}}`, `{{order.status}}` |
 | `abandoned_cart` | `{{cart.items_summary}}`, `{{cart.total}}`, `{{cart.abandon_time}}` |

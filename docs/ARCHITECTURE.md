@@ -179,7 +179,7 @@ Flows are directed acyclic graphs (DAGs):
 
 | Type | Purpose | Sub-types |
 |------|---------|-----------|
-| Trigger | Entry point | 7 event types: order_completed, payment_failed, order_status_changed, abandoned_cart, first_order, nth_order, no_order_in_x_days |
+| Trigger | Entry point | 7 event types: order_completed, payment_failed, order_status_changed, abandoned_cart, first_order, nth_order, no_order_in_x_days. **order_completed fires on fulfillment statuses** (ready, out_for_delivery, delivered, completed) — not just manual 'completed'. |
 | Action | Execute task | 3 action types: send_email, send_sms, outgoing_webhook |
 | Condition | Branch logic | yes_no (trigger-bound — reads filter from trigger node config; no operator UI) |
 | Timer | Delay execution | delay, date_field |
@@ -248,6 +248,32 @@ This prevents a single order from enrolling in the same flow more than once, eve
 ```
 order status → 'ready' → order_completed trigger fires → flow enrolled ✓
 order status → 'delivered' → order_completed trigger fires → hasOrderBeenProcessedForFlow → already enrolled ✗
+```
+
+### Qualifying Fulfillment Statuses
+
+The `order_completed` trigger fires when an order reaches **any** of these statuses:
+
+```
+ORDER_COMPLETED_QUALIFYING_STATUSES = ['ready', 'out_for_delivery', 'delivered', 'completed']
+```
+
+This means restaurant operators don't need to know which status their staff uses as the "final" step — automations fire on the first qualifying status change.
+
+### Two-Event-Path Design
+
+When an order status changes, two Kafka event paths can fire `processOrderAsCompleted`:
+
+1. **`order.status_changed`** → `handleOrderStatusChanged()` checks if `newStatus` is in `ORDER_COMPLETED_QUALIFYING_STATUSES` → calls `processOrderAsCompleted()`
+2. **`order.completed`** → `handleOrderCompleted()` → calls `processOrderAsCompleted()`
+
+Both paths converge on `processOrderAsCompleted()`, which uses `tryProcessEvent` to ensure it runs exactly once per order. Additionally, `TriggerService.evaluateSingleFlow` uses `hasOrderBeenProcessedForFlow` for per-flow dedup when `eventType === 'order_completed'`.
+
+```
+order status → 'ready'    → order.status_changed → processOrderAsCompleted ✓ (first qualifying)
+order status → 'delivered' → order.status_changed → processOrderAsCompleted ✗ (tryProcessEvent blocks)
+order status → 'completed' → order.status_changed → processOrderAsCompleted ✗ (tryProcessEvent blocks)
+                           → order.completed      → processOrderAsCompleted ✗ (tryProcessEvent blocks)
 ```
 
 ### Why Both Are Needed

@@ -17,6 +17,14 @@ import { createLogger } from '../../config/logger.js';
 
 const log = createLogger('OrderEventConsumer');
 
+/**
+ * Statuses that qualify as "order completed" for CRM trigger purposes.
+ * When an order reaches any of these statuses via order.status_changed,
+ * processOrderAsCompleted() is called (with tryProcessEvent idempotency
+ * ensuring it only runs once per order).
+ */
+const ORDER_COMPLETED_QUALIFYING_STATUSES = ['ready', 'out_for_delivery', 'delivered', 'completed'];
+
 export class OrderEventConsumer {
   private consumer: ReturnType<typeof createConsumer> | null = null;
   private readonly contactService: ContactService;
@@ -212,17 +220,28 @@ export class OrderEventConsumer {
     const contact = await this.contactService.getByCustomerId(restaurantId, customerId);
     if (!contact) return;
 
+    const newStatus = (payload.status ?? payload.newStatus) as string | undefined;
+
     await this.triggerService.evaluateTriggers(restaurantId, 'order_status_changed', contact._id.toString(), {
       orderId: payload.orderId as string | undefined,
       orderNumber: payload.orderNumber as string | undefined,
       customerId,
       customerEmail: payload.customerEmail as string | undefined,
       customerName: payload.customerName as string | undefined,
+      customerPhone: payload.customerPhone as string | undefined,
       orderType: payload.orderType as string | undefined,
       orderTotal: payload.orderTotal as number | undefined,
-      newStatus: (payload.status ?? payload.newStatus) as string | undefined,
+      paymentStatus: payload.paymentStatus as string | undefined,
+      newStatus,
       previousStatus: (payload.previousStatus ?? payload.oldStatus) as string | undefined,
     });
+
+    // If the new status qualifies as "order completed", fire processOrderAsCompleted.
+    // tryProcessEvent inside ensures this only executes once per order across all qualifying statuses.
+    if (newStatus && ORDER_COMPLETED_QUALIFYING_STATUSES.includes(newStatus)) {
+      log.info({ orderId: payload.orderId, newStatus }, 'Qualifying fulfillment status — firing processOrderAsCompleted');
+      await this.processOrderAsCompleted(payload, restaurantId);
+    }
   }
 
   /**

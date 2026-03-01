@@ -102,6 +102,19 @@ export class TriggerService {
       return { flowId, flowName: flow.name, enrolled: false, reason: 'Trigger conditions not met' };
     }
 
+    // Order-level dedup: for order_completed, check if this order was already processed for this flow
+    if (eventType === 'order_completed' && payload.orderId) {
+      const alreadyProcessed = await this.executionRepo.hasOrderBeenProcessedForFlow(
+        restaurantId,
+        flowId,
+        payload.orderId as string,
+      );
+      if (alreadyProcessed) {
+        log.info({ flowId, contactId, orderId: payload.orderId }, 'Order already processed for this flow — skipping');
+        return { flowId, flowName: flow.name, enrolled: false, reason: 'Order already processed for this flow' };
+      }
+    }
+
     // Anti-spam: check if already enrolled
     const isEnrolled = await this.executionRepo.isContactEnrolled(restaurantId, flowId, contactId);
     if (isEnrolled) {
