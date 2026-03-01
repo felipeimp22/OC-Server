@@ -197,6 +197,18 @@ export class TriggerService {
       }
     }
 
+    // nth_order: fire exactly once when contact's totalOrders reaches config.n.
+    // nth_order depends on contact.totalOrders being incremented in
+    // processOrderAsCompleted() BEFORE this evaluation. Count includes current order.
+    if (triggerNode.subType === 'nth_order') {
+      const n = config.n as number | undefined;
+      const totalOrders = payload.totalOrders as number | undefined;
+      if (n == null || totalOrders == null || totalOrders !== n) {
+        log.info({ n, totalOrders, reason: 'nth_order threshold not met (requires exact match)' }, 'nth_order check failed');
+        return false;
+      }
+    }
+
     // Check targetStatus filter (order_status_changed trigger — fire only for configured status)
     if (config.targetStatus && typeof config.targetStatus === 'string' && config.targetStatus !== '') {
       const actualStatus = (payload.newStatus ?? (payload as any).status) as string | undefined;

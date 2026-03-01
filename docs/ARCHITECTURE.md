@@ -363,6 +363,24 @@ payment.succeeded → handleNewOrder()
 - **`tryProcessEvent`** prevents double stats increment across two Kafka event paths (order.status_changed + order.completed both fire when status='completed')
 - **`hasOrderBeenProcessedForFlow`** prevents per-flow re-enrollment across multiple qualifying status changes (ready → delivered → completed all qualify) and ensures one new_order fire per order per flow
 
+## nth_order Trigger — Ordering Dependency
+
+The `nth_order` trigger fires exactly once when a customer's total completed orders reaches the configured threshold (`config.n`). This depends on a critical ordering invariant in `processOrderAsCompleted()`:
+
+```
+processOrderAsCompleted()
+  1. incrementOrderStats() → totalOrders includes current order ($inc + { new: true })
+  2. evaluateTriggers('nth_order', ..., { totalOrders: updatedContact.totalOrders })
+  3. TriggerService.checkTriggerConditions() → exact equality: totalOrders === config.n
+```
+
+**Key invariants:**
+- `incrementOrderStats()` is called **BEFORE** `evaluateTriggers()` — so `totalOrders` includes the current order when checked against `config.n`
+- The check uses `===` (exact equality, not `>=`) — ensures the trigger fires exactly once at the threshold, not on every subsequent order
+- `tryProcessEvent('order_completed_process:${orderId}')` prevents double-incrementing `totalOrders` for the same order
+- Only `processOrderAsCompleted()` increments `totalOrders` (not `handleNewOrder`) — so only paid/fulfilled orders count
+- The `first_order` trigger uses a separate `totalOrders === 1` check in `processOrderAsCompleted()` and does NOT go through `checkTriggerConditions`
+
 ## Time-Based Trigger Architecture
 
 The CRM engine uses three distinct time-based mechanisms. Understanding which mechanism applies where is critical to avoid confusion.
