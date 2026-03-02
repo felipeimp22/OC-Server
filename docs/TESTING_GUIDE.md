@@ -821,7 +821,7 @@ This tests sync-contacts, seed, flow creation/activation, Kafka event publishing
 
 ## 10. Trigger System Testing
 
-This section covers testing triggers, execution features, and item-based triggers in the CRM engine. Subsections 10.1–10.7 cover the original trigger types: **order_completed** (fulfillment statuses), **order_status_changed** (targetStatuses multi-select filter), **new_order** (payment.succeeded), template variables, and abandoned cart. Subsection 10.8 covers **action chaining and fan-out** (v3). Subsection 10.9 covers **item_ordered** and **item_ordered_x_times** triggers (v3). Subsection 10.10 covers **multi-select status filtering** (targetStatuses array for item triggers). Subsection 10.11 covers the **runOnce toggle** for order_status_changed. Subsection 10.12 covers **payment status enforcement** (universal guard). Each subsection includes copy-paste commands, expected server logs, and MongoDB verification queries.
+This section covers testing triggers, execution features, and item-based triggers in the CRM engine. Subsections 10.1–10.7 cover the original trigger types: **order_completed** (fulfillment statuses), **order_status_changed** (targetStatuses multi-select filter), **new_order** (payment.succeeded), template variables, and abandoned cart. Subsection 10.8 covers **action chaining and fan-out** (v3). Subsection 10.9 covers **item_ordered** and **item_ordered_x_times** triggers (v3). Subsection 10.10 covers **multi-select status filtering** (targetStatuses array for item triggers). Subsection 10.11 covers the **runOnce toggle** for order_status_changed. Subsection 10.12 covers **payment status enforcement** (universal guard). Subsection 10.13 covers **item_ordered email delivery** (customer and custom recipients). Subsection 10.14 covers **action failure logging** (error recording). Subsection 10.15 covers **item_ordered_x_times counting from activation** (sinceDate, pre-activation exclusion). Subsection 10.16 covers **flow validation R-12 through R-19** (complete semantic rule tests). Each subsection includes copy-paste commands, expected server logs, and MongoDB verification queries.
 
 **Prerequisites**: Kafka running (`ENABLE_KAFKA=true`), an existing restaurant ID, and at least one customer ID in the database. Replace `YOUR_RESTAURANT_ID` and `YOUR_CUSTOMER_ID` with real ObjectId strings throughout.
 
@@ -1397,7 +1397,7 @@ Then restart with `ENABLE_SCHEDULERS=true` and watch for:
 
 ### Graph Validation Examples
 
-Test the 11 validation rules via the REST API:
+Test the structural validation rules (R-1 through R-11) via the REST API. For semantic rules (R-12 through R-19), see section 10.7b and 10.16.
 
 **R-1: Exactly one trigger node required**
 ```bash
@@ -1883,6 +1883,255 @@ The `abandoned_cart` trigger is exempt from the payment guard (it inherently tar
 #### Test E: no_order_in_x_days — exempt from payment guard
 
 The `no_order_in_x_days` trigger is cron-based and has no order context in its payload. It is exempt from the payment guard. See the "Testing no_order_in_x_days Cron" troubleshooting section for testing instructions.
+
+---
+
+### 10.13 Item Ordered — Email Delivery Verification
+
+Verify that item_ordered trigger flows actually deliver emails for both customer and custom recipients.
+
+#### Setup: Create a flow with item_ordered trigger and email action
+
+```bash
+curl -X POST http://localhost:3001/api/v1/flows \
+  -H "Authorization: Bearer TOKEN" -H "X-Restaurant-Id: REST_ID" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "Item Ordered Email Test",
+    "nodes": [
+      {"id":"t1","type":"trigger","subType":"item_ordered","label":"Item Ordered","config":{"items":[{"menuItemId":"MENU_ITEM_ID","menuItemName":"Margherita Pizza","modifiers":[]}],"matchMode":"any"},"position":{"x":100,"y":100}},
+      {"id":"a1","type":"action","subType":"send_email","label":"Customer Email","config":{"recipients":[{"type":"customer"},{"type":"custom","email":"manager@restaurant.com"}],"subject":"You ordered {{matched_item.name}}!","body":"Hi {{customer.first_name}}, thanks for ordering {{matched_item.name}}."},"position":{"x":100,"y":300}}
+    ],
+    "edges": [{"id":"e1","sourceNodeId":"t1","targetNodeId":"a1"}]
+  }'
+
+# Activate the flow
+curl -s -X POST http://localhost:3001/api/v1/flows/FLOW_ID/activate \
+  -H "Authorization: Bearer TOKEN" -H "X-Restaurant-Id: REST_ID"
+```
+
+#### Test A: Customer recipient — email sent to contact.email
+
+Ensure the order in the DB contains the configured menu item, then send an order.completed event with `paymentStatus: 'paid'`.
+
+**Verify — communication log shows email sent to customer:**
+```javascript
+db.crm_communication_logs.find({
+  restaurantId: ObjectId('REST_ID'),
+  channel: 'email'
+}).sort({ createdAt: -1 }).limit(1).pretty()
+// Expected: status='sent', to includes the customer's email address
+// Subject should be interpolated: "You ordered Margherita Pizza!"
+```
+
+#### Test B: Custom recipient — email sent to literal address
+
+The custom recipient (`manager@restaurant.com`) should also receive the email.
+
+**Verify — communication log shows both recipients:**
+```javascript
+db.crm_communication_logs.find({
+  restaurantId: ObjectId('REST_ID'),
+  channel: 'email'
+}).sort({ createdAt: -1 }).limit(2).pretty()
+// Expected: at least one log with to containing 'manager@restaurant.com'
+```
+
+#### Test C: Customer email is null — warning logged, custom recipient still receives
+
+If the contact has no email, the customer recipient is skipped with a warning, but the custom recipient still gets the email.
+
+**Verify — execution log shows action completed (custom recipient received):**
+```javascript
+db.crm_flow_execution_logs.find({ executionId: '<EXEC_ID>', nodeType: 'action' }).pretty()
+// Expected: result='success' (at least one recipient resolved)
+```
+
+---
+
+### 10.14 Action Failure Logging
+
+Verify that action failures are properly recorded on the execution record.
+
+#### Test A: Email with no recipients — execution records error
+
+Create a flow where the email action has an empty recipients array (bypass R-12 by saving directly to DB or by removing recipients after saving):
+
+```javascript
+// Manually insert a flow with empty recipients (for testing only)
+db.crm_flows.updateOne(
+  { _id: ObjectId('FLOW_ID') },
+  { $set: { 'nodes.$[node].config.recipients': [] } },
+  { arrayFilters: [{ 'node.subType': 'send_email' }] }
+)
+```
+
+Trigger the flow via a Kafka event.
+
+**Verify — error recorded on execution:**
+```javascript
+db.crm_flow_executions.findOne({ flowId: ObjectId('FLOW_ID') })
+// Expected: erroredNodes includes the email action node ID
+// completedNodes should NOT include the email node
+
+db.crm_flow_execution_logs.findOne({
+  executionId: '<EXEC_ID>',
+  nodeType: 'action',
+  result: 'failure'
+})
+// Expected: error contains "No recipients resolved"
+```
+
+**Verify — flow still advances (not halted):**
+If the email action has downstream nodes, they should still execute. The flow completes with partial errors.
+
+#### Test B: Webhook with invalid URL — execution records error
+
+Create a flow with a webhook action where `config.url` is empty or doesn't start with `http`.
+
+**Verify — error recorded:**
+```javascript
+db.crm_flow_execution_logs.findOne({
+  executionId: '<EXEC_ID>',
+  nodeType: 'action',
+  result: 'failure'
+})
+// Expected: error contains "Webhook URL is empty" or "Webhook URL is invalid"
+```
+
+#### Test C: SMS with empty body — execution records error
+
+```javascript
+db.crm_flow_execution_logs.findOne({
+  executionId: '<EXEC_ID>',
+  nodeType: 'action',
+  result: 'failure'
+})
+// Expected: error contains "SMS body is empty"
+```
+
+---
+
+### 10.15 item_ordered_x_times — Counting from Flow Activation
+
+Verify that orders placed before `flow.activatedAt` are NOT counted toward the threshold.
+
+#### Setup
+
+1. Create several orders for a customer containing the target menu item (these are "pre-activation" orders)
+2. Create a flow with item_ordered_x_times trigger (threshold=3)
+3. Activate the flow — `activatedAt` is set to now
+
+#### Test A: Pre-activation orders not counted
+
+After activation, send 1 order with the target item.
+
+**Verify — no execution yet (count is 1, threshold is 3):**
+```javascript
+db.crm_flow_executions.find({ flowId: ObjectId('FLOW_ID') }).count()
+// Expected: 0 (only 1 post-activation order, threshold=3)
+```
+
+#### Test B: Post-activation orders reach threshold
+
+Send 2 more orders with the target item (total post-activation = 3).
+
+**Verify — trigger fires on the 3rd post-activation order:**
+```javascript
+db.crm_flow_executions.find({ flowId: ObjectId('FLOW_ID') }).count()
+// Expected: 1
+
+db.crm_trigger_achievements.findOne({ flowId: ObjectId('FLOW_ID') })
+// Expected: count >= 3, achievedAt after flow.activatedAt
+```
+
+#### Test C: Verify aggregation uses sinceDate
+
+Check the MongoDB aggregation directly:
+```javascript
+// This should only count orders after activatedAt
+db.orders.aggregate([
+  { $match: {
+    restaurantId: ObjectId('REST_ID'),
+    customerId: ObjectId('CUSTOMER_ID'),
+    paymentStatus: 'paid',
+    createdAt: { $gte: ISODate('FLOW_ACTIVATED_AT') }
+  }},
+  { $unwind: '$items' },
+  { $match: { 'items.menuItemId': ObjectId('MENU_ITEM_ID') } },
+  { $count: 'total' }
+])
+// Expected: total = 3 (only post-activation orders)
+```
+
+#### Test D: Legacy flow without activatedAt — falls back to all-time counting
+
+For flows activated before the `activatedAt` feature was added, counting falls back to all-time.
+
+**Expected server logs:**
+```
+[TriggerService] Flow missing activatedAt — using all-time counting for item_ordered_x_times
+```
+
+---
+
+### 10.16 Flow Validation R-12 through R-19 — Complete Test Matrix
+
+Comprehensive tests for all 8 semantic validation rules. These rules prevent saving flows with incomplete node configuration.
+
+#### R-13: Email action missing subject
+```bash
+curl -X POST http://localhost:3001/api/v1/flows \
+  -H "Authorization: Bearer TOKEN" -H "X-Restaurant-Id: REST_ID" \
+  -H "Content-Type: application/json" \
+  -d '{"name":"Test R-13","nodes":[{"id":"t1","type":"trigger","subType":"order_completed","label":"Trigger","config":{},"position":{"x":100,"y":100}},{"id":"a1","type":"action","subType":"send_email","label":"Email","config":{"subject":"","body":"Hello","recipients":[{"type":"customer"}]},"position":{"x":100,"y":300}}],"edges":[{"id":"e1","sourceNodeId":"t1","targetNodeId":"a1"}]}'
+# → 422 { "error": "INVALID_GRAPH", "rule": "R-13", "message": "Email action \"Email\" has no subject" }
+```
+
+#### R-14: SMS action missing body
+```bash
+curl -X POST http://localhost:3001/api/v1/flows \
+  -H "Authorization: Bearer TOKEN" -H "X-Restaurant-Id: REST_ID" \
+  -H "Content-Type: application/json" \
+  -d '{"name":"Test R-14","nodes":[{"id":"t1","type":"trigger","subType":"order_completed","label":"Trigger","config":{},"position":{"x":100,"y":100}},{"id":"a1","type":"action","subType":"send_sms","label":"SMS","config":{"recipient":{"type":"customer"},"body":""},"position":{"x":100,"y":300}}],"edges":[{"id":"e1","sourceNodeId":"t1","targetNodeId":"a1"}]}'
+# → 422 { "error": "INVALID_GRAPH", "rule": "R-14", "message": "SMS action \"SMS\" has no message body" }
+```
+
+#### R-15: SMS custom recipient missing phone
+```bash
+curl -X POST http://localhost:3001/api/v1/flows \
+  -H "Authorization: Bearer TOKEN" -H "X-Restaurant-Id: REST_ID" \
+  -H "Content-Type: application/json" \
+  -d '{"name":"Test R-15","nodes":[{"id":"t1","type":"trigger","subType":"order_completed","label":"Trigger","config":{},"position":{"x":100,"y":100}},{"id":"a1","type":"action","subType":"send_sms","label":"SMS","config":{"recipient":{"type":"custom","phone":""},"body":"Hello"},"position":{"x":100,"y":300}}],"edges":[{"id":"e1","sourceNodeId":"t1","targetNodeId":"a1"}]}'
+# → 422 { "error": "INVALID_GRAPH", "rule": "R-15", "message": "SMS action \"SMS\" has custom recipient with no phone number" }
+```
+
+#### R-17: Item trigger missing items
+```bash
+curl -X POST http://localhost:3001/api/v1/flows \
+  -H "Authorization: Bearer TOKEN" -H "X-Restaurant-Id: REST_ID" \
+  -H "Content-Type: application/json" \
+  -d '{"name":"Test R-17","nodes":[{"id":"t1","type":"trigger","subType":"item_ordered","label":"Item Trigger","config":{"items":[],"matchMode":"any"},"position":{"x":100,"y":100}},{"id":"a1","type":"action","subType":"send_email","label":"Email","config":{"recipients":[{"type":"customer"}],"subject":"Hello","body":"World"},"position":{"x":100,"y":300}}],"edges":[{"id":"e1","sourceNodeId":"t1","targetNodeId":"a1"}]}'
+# → 422 { "error": "INVALID_GRAPH", "rule": "R-17", "message": "Item trigger \"Item Trigger\" has no menu items configured" }
+```
+
+#### R-18: Timer delay missing duration
+```bash
+curl -X POST http://localhost:3001/api/v1/flows \
+  -H "Authorization: Bearer TOKEN" -H "X-Restaurant-Id: REST_ID" \
+  -H "Content-Type: application/json" \
+  -d '{"name":"Test R-18","nodes":[{"id":"t1","type":"trigger","subType":"order_completed","label":"Trigger","config":{},"position":{"x":100,"y":100}},{"id":"a1","type":"action","subType":"send_email","label":"Email","config":{"recipients":[{"type":"customer"}],"subject":"Hello","body":"World"},"position":{"x":100,"y":250}},{"id":"tm1","type":"timer","subType":"delay","label":"Wait","config":{},"position":{"x":100,"y":400}},{"id":"a2","type":"action","subType":"send_sms","label":"SMS","config":{"recipient":{"type":"customer"},"body":"Follow up"},"position":{"x":100,"y":550}}],"edges":[{"id":"e1","sourceNodeId":"t1","targetNodeId":"a1"},{"id":"e2","sourceNodeId":"a1","targetNodeId":"tm1"},{"id":"e3","sourceNodeId":"tm1","targetNodeId":"a2"}]}'
+# → 422 { "error": "INVALID_GRAPH", "rule": "R-18", "message": "Timer \"Wait\" has no delay duration set" }
+```
+
+#### R-19: Timer date_field missing target date
+```bash
+curl -X POST http://localhost:3001/api/v1/flows \
+  -H "Authorization: Bearer TOKEN" -H "X-Restaurant-Id: REST_ID" \
+  -H "Content-Type: application/json" \
+  -d '{"name":"Test R-19","nodes":[{"id":"t1","type":"trigger","subType":"order_completed","label":"Trigger","config":{},"position":{"x":100,"y":100}},{"id":"a1","type":"action","subType":"send_email","label":"Email","config":{"recipients":[{"type":"customer"}],"subject":"Hello","body":"World"},"position":{"x":100,"y":250}},{"id":"tm1","type":"timer","subType":"date_field","label":"Schedule","config":{},"position":{"x":100,"y":400}},{"id":"a2","type":"action","subType":"send_sms","label":"SMS","config":{"recipient":{"type":"customer"},"body":"Follow up"},"position":{"x":100,"y":550}}],"edges":[{"id":"e1","sourceNodeId":"t1","targetNodeId":"a1"},{"id":"e2","sourceNodeId":"a1","targetNodeId":"tm1"},{"id":"e3","sourceNodeId":"tm1","targetNodeId":"a2"}]}'
+# → 422 { "error": "INVALID_GRAPH", "rule": "R-19", "message": "Timer \"Schedule\" has no target date set" }
+```
 
 ---
 

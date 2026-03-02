@@ -331,7 +331,7 @@ This means restaurant operators don't need to know which status their staff uses
 
 When an order status changes, two Kafka event paths can fire `processOrderAsCompleted`:
 
-1. **`order.status_changed`** → `handleOrderStatusChanged()` checks if `newStatus` is in `ORDER_COMPLETED_QUALIFYING_STATUSES` → calls `processOrderAsCompleted()`
+1. **`order.status_changed`** → `handleOrderStatusChanged()` uses `upsertFromEvent()` (not `getByCustomerId()`) to ensure contacts are always created for first-time customers, then checks if `newStatus` is in `ORDER_COMPLETED_QUALIFYING_STATUSES` → calls `processOrderAsCompleted()`
 2. **`order.completed`** → `handleOrderCompleted()` → calls `processOrderAsCompleted()`
 
 Both paths converge on `processOrderAsCompleted()`, which uses `tryProcessEvent` to ensure it runs exactly once per order. Additionally, `TriggerService.evaluateSingleFlow` uses `hasOrderBeenProcessedForFlow` for per-flow dedup when `eventType === 'order_completed'` or `eventType === 'new_order'`.
@@ -380,6 +380,7 @@ All order-related triggers require confirmed payment (`paymentStatus === 'paid'`
 | `order_status_changed` | Yes | Status changes for unpaid orders should NOT trigger CRM flows |
 | `abandoned_cart` | **Exempt** | Inherently targets pending/unpaid orders |
 | `no_order_in_x_days` | **Exempt** | Cron-based, no order context in payload |
+| `payment_failed` | **Exempt** | Fires on failed payments — payment guard does not apply |
 
 ### Payment Status Normalization
 
