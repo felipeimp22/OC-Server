@@ -179,7 +179,7 @@ Flows are directed acyclic graphs (DAGs):
 
 | Type | Purpose | Sub-types |
 |------|---------|-----------|
-| Trigger | Entry point | 9 event types: new_order, order_completed, order_status_changed, abandoned_cart, first_order, nth_order, no_order_in_x_days, item_ordered, item_ordered_x_times. **new_order** fires on payment.succeeded (uses upsertFromEvent for first-time customers). **order_completed fires on fulfillment statuses** (ready, out_for_delivery, delivered, completed) — not just manual 'completed'. **item_ordered** fires when an order contains configured menu items (with optional modifier matching). **item_ordered_x_times** fires when a customer's cumulative count of ordering specific items reaches a threshold (exact equality). |
+| Trigger | Entry point | 9 event types: new_order, order_completed, order_status_changed, abandoned_cart, first_order, nth_order, no_order_in_x_days, item_ordered, item_ordered_x_times. **new_order** fires on payment.succeeded (uses upsertFromEvent for first-time customers). **order_completed fires on fulfillment statuses** (ready, out_for_delivery, delivered, completed) — not just manual 'completed'. **item_ordered** fires when an order contains configured menu items (with optional modifier matching). **item_ordered_x_times** fires when a customer's cumulative count of ordering specific items reaches a threshold (count >= threshold, with achievement-based dedup). Supports once mode (default) and reset mode. |
 | Action | Execute task (may chain to other actions, timers, or conditions) | 3 action types: send_email, send_sms, outgoing_webhook |
 | Condition | Branch logic | yes_no (trigger-bound — reads filter from trigger node config; no operator UI) |
 | Timer | Delay execution | delay, date_field |
@@ -277,7 +277,7 @@ All topic names are defined in `src/kafka/topics.ts` (`KAFKA_TOPICS`):
 
 | Service | Responsibility |
 |---------|---------------|
-| FlowService | Flow CRUD, activation, graph validation (11 rules R-1..R-11) |
+| FlowService | Flow CRUD, activation, graph validation (19 rules: R-1..R-11 structural + R-12..R-19 semantic) |
 | FlowEngineService | DAG traversal and node execution orchestration |
 | TriggerService | Event → flow matching and enrollment |
 | ActionService | Action node execution: send_email, send_sms, outgoing_webhook |
@@ -853,3 +853,20 @@ The `crm_flows.activatedAt` field records when a flow was first activated. It is
 - Preserved across pause/reactivate cycles (never overwritten)
 
 This field is used by `countItemOrdersByCustomer` to filter orders — only orders placed after the flow was activated are counted toward the threshold.
+
+## Semantic Validation Rules (R-12 through R-19)
+
+In addition to the 11 structural graph rules (R-1 through R-11), the flow validation enforces 8 semantic rules checking node configuration completeness. These rules are enforced on both client (`oc-restaurant-manager/lib/crm/flowValidation.ts`) and server (`oc-server/src/lib/flowValidation.ts`).
+
+| Rule | Description |
+|------|-------------|
+| R-12 | Email action must have at least one recipient (`config.recipients` non-empty array) |
+| R-13 | Email action must have a subject (`config.subject` non-empty after trim) |
+| R-14 | SMS action must have a body (`config.body` non-empty after trim) |
+| R-15 | SMS custom recipient must have a phone number (`config.recipient.phone` when type=custom) |
+| R-16 | Webhook action must have a valid URL (`config.url` starts with http:// or https://) |
+| R-17 | Item trigger must have at least one item (`config.items` non-empty for item_ordered / item_ordered_x_times) |
+| R-18 | Timer delay must have a positive duration (`config.duration` > 0 for delay timer) |
+| R-19 | Timer date_field must have a target date (`config.targetDateUtc` non-empty for date_field timer) |
+
+On validation failure: server returns `422 { error: 'INVALID_GRAPH', rule: 'R-N', message: '...' }`. Client shows toast with the error message.

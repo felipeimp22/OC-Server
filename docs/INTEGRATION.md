@@ -259,7 +259,12 @@ Each trigger node stores its configuration in `node.config`. The backend reads t
 | `item_ordered_x_times` | `items` | `Array<{ menuItemId, menuItemName, modifiers?[] }>` | — | `TriggerService.checkTriggerConditions()` |
 | `item_ordered_x_times` | `matchMode` | `'any' \| 'all'` | `'any'` | `TriggerService.checkTriggerConditions()` |
 | `item_ordered_x_times` | `threshold` | `number` (min 2) | — | `TriggerService.checkTriggerConditions()` |
+| `item_ordered_x_times` | `resetOnThreshold` | `boolean` | `false` | When `true`, counter resets after reaching threshold (fires repeatedly at intervals). When `false` (default), fires exactly once. |
 | `item_ordered_x_times` | `targetStatuses` | `string[]` | — (any) | `TriggerService.checkTriggerConditions()` — optional filter by order status at time of trigger. |
+
+> **Counting from activation:** The `item_ordered_x_times` trigger counts orders from `flow.activatedAt` — the date when the flow was first activated. Historical orders placed before activation are not counted toward the threshold. Legacy flows without `activatedAt` fall back to all-time counting.
+
+> **Action failure handling:** When an action node (email, SMS, webhook) fails validation or execution, the failure is logged on the `FlowExecutionLog` and the node is moved to `erroredNodes[]`. The flow continues to advance — action failures do not halt the entire flow.
 
 ---
 

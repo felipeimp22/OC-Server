@@ -1431,6 +1431,28 @@ curl -X PUT http://localhost:3001/api/v1/flows/FLOW_ID \
 # → 422 { "error": "INVALID_GRAPH", "rule": "R-11", "message": "Node t1 has 11 outgoing edges (max 10)" }
 ```
 
+### 10.7b Semantic Validation Rules (R-12 through R-19)
+
+Test that flows with incomplete node configuration are rejected at save time.
+
+#### R-12: Email action missing recipients
+```bash
+curl -X POST http://localhost:3001/api/v1/flows \
+  -H "Authorization: Bearer TOKEN" -H "X-Restaurant-Id: REST_ID" \
+  -H "Content-Type: application/json" \
+  -d '{"name":"Test R-12","nodes":[{"id":"t1","type":"trigger","subType":"order_completed","label":"Trigger","config":{},"position":{"x":100,"y":100}},{"id":"a1","type":"action","subType":"send_email","label":"Email","config":{"subject":"Hello","body":"World","recipients":[]},"position":{"x":100,"y":300}}],"edges":[{"id":"e1","sourceNodeId":"t1","targetNodeId":"a1"}]}'
+# → 422 { "error": "INVALID_GRAPH", "rule": "R-12", "message": "Email action \"Email\" has no recipients configured" }
+```
+
+#### R-16: Webhook action with invalid URL
+```bash
+curl -X POST http://localhost:3001/api/v1/flows \
+  -H "Authorization: Bearer TOKEN" -H "X-Restaurant-Id: REST_ID" \
+  -H "Content-Type: application/json" \
+  -d '{"name":"Test R-16","nodes":[{"id":"t1","type":"trigger","subType":"order_completed","label":"Trigger","config":{},"position":{"x":100,"y":100}},{"id":"a1","type":"action","subType":"outgoing_webhook","label":"Webhook","config":{"url":"not-a-url","body":"{}"},"position":{"x":100,"y":300}}],"edges":[{"id":"e1","sourceNodeId":"t1","targetNodeId":"a1"}]}'
+# → 422 { "error": "INVALID_GRAPH", "rule": "R-16", "message": "Webhook action \"Webhook\" has no URL or invalid URL" }
+```
+
 ### 10.8 Action Chaining and Fan-Out
 
 Test scenarios for v3 action chaining and parallel fan-out execution.
