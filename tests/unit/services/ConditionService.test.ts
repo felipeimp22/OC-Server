@@ -158,12 +158,6 @@ describe('ConditionService', () => {
   });
 
   describe('evaluate — triggers with no filter config (always yes)', () => {
-    it('payment_failed → always yes', () => {
-      const trigger = makeTriggerNode('payment_failed', {});
-      const result = service.evaluate(makeConditionNode(), trigger, makeContact(), {});
-      expect(result.handle).toBe('yes');
-    });
-
     it('abandoned_cart → always yes', () => {
       const trigger = makeTriggerNode('abandoned_cart', {});
       const result = service.evaluate(makeConditionNode(), trigger, makeContact(), {});

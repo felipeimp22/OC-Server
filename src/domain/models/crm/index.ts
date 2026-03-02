@@ -57,5 +57,11 @@ export { Campaign, type ICampaignDocument, type CampaignStatus } from './Campaig
 // Tasks (from CRM.docx)
 export { Task, type ITaskDocument, type TaskPriority, type TaskStatus } from './Task.js';
 
+// Trigger achievements (cumulative trigger tracking)
+export {
+  TriggerAchievement,
+  type ITriggerAchievementDocument,
+} from './TriggerAchievement.js';
+
 // Idempotency
 export { ProcessedEvent, type IProcessedEventDocument } from './ProcessedEvent.js';

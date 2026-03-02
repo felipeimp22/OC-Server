@@ -75,7 +75,7 @@ Retry path: if HTTP delivery fails, the `/api/cron/crm-events` cron in `oc-resta
 6. **Flow enrollment** — create a FlowExecution for each matching flow
 7. **Node processing** — the Flow Engine traverses the DAG node by node:
    - **Trigger**: Already matched, advance to next node
-   - **Action**: Execute via ActionService (send_email, send_sms, outgoing_webhook); action nodes are terminal (no outgoing edges)
+   - **Action**: Execute via ActionService (send_email, send_sms, outgoing_webhook); action nodes may chain to other actions, timers, or conditions (fan-out supported)
    - **Condition**: Evaluate via ConditionService using trigger-bound semantics; yes/no branch selection
    - **Timer**: Schedule via BullMQ, pause execution until timer fires
 8. **Completion** — when no more downstream nodes, mark execution as completed
@@ -179,8 +179,8 @@ Flows are directed acyclic graphs (DAGs):
 
 | Type | Purpose | Sub-types |
 |------|---------|-----------|
-| Trigger | Entry point | 8 event types: new_order, order_completed, payment_failed, order_status_changed, abandoned_cart, first_order, nth_order, no_order_in_x_days. **new_order** fires on payment.succeeded (uses upsertFromEvent for first-time customers). **order_completed fires on fulfillment statuses** (ready, out_for_delivery, delivered, completed) — not just manual 'completed'. |
-| Action | Execute task | 3 action types: send_email, send_sms, outgoing_webhook |
+| Trigger | Entry point | 9 event types: new_order, order_completed, order_status_changed, abandoned_cart, first_order, nth_order, no_order_in_x_days, item_ordered, item_ordered_x_times. **new_order** fires on payment.succeeded (uses upsertFromEvent for first-time customers). **order_completed fires on fulfillment statuses** (ready, out_for_delivery, delivered, completed) — not just manual 'completed'. **item_ordered** fires when an order contains configured menu items (with optional modifier matching). **item_ordered_x_times** fires when a customer's cumulative count of ordering specific items reaches a threshold (count >= threshold, with achievement-based dedup). Supports once mode (default) and reset mode. |
+| Action | Execute task (may chain to other actions, timers, or conditions) | 3 action types: send_email, send_sms, outgoing_webhook |
 | Condition | Branch logic | yes_no (trigger-bound — reads filter from trigger node config; no operator UI) |
 | Timer | Delay execution | delay, date_field |
 
@@ -190,6 +190,73 @@ Each node can have multiple outgoing edges. The engine:
 1. Finds all edges where `sourceNodeId` matches the current node
 2. For conditions, uses `sourceHandle` to pick the correct branch (e.g., "yes"/"no")
 3. For regular nodes, follows all outgoing edges (parallel execution)
+
+### Fan-Out Execution Model
+
+When a node has multiple outgoing edges, the engine dispatches each downstream node as a separate Kafka `flow.step.ready` event, enabling parallel branch execution within a single FlowExecution.
+
+#### Tracking Fields (`crm_flow_executions`)
+
+| Field | Type | Purpose |
+|-------|------|---------|
+| `currentNodeId` | `string` | Backward-compat: set to the first downstream target on advance |
+| `pendingNodes` | `string[]` | Node IDs currently being processed or dispatched (default `[]`) |
+| `completedNodes` | `string[]` | Node IDs that finished successfully (default `[]`) |
+| `erroredNodes` | `string[]` | Node IDs that failed (default `[]`) |
+
+#### Lifecycle
+
+```
+enrollContact()
+  → create execution with pendingNodes=[triggerNodeId]
+  → processCurrentNode(executionId)
+
+processCurrentNode(executionId, nodeId)
+  → process the node (action/condition/trigger)
+  → advanceToNext(): filter ALL outgoing edges
+      → $addToSet downstream nodeIds to pendingNodes
+      → produce flow.step.ready Kafka event per target
+  → $pull nodeId from pendingNodes, $addToSet to completedNodes
+  → if pendingNodes is empty → determine final status
+```
+
+#### Error Isolation
+
+Each node processes inside a try-catch. On failure:
+- The failed node is moved from `pendingNodes` to `erroredNodes` ($pull/$addToSet atomic)
+- **Sibling branches continue unaffected** — they have their own pending entries
+- Final status: if `pendingNodes` empties with only `erroredNodes` (no `completedNodes`), execution is marked `error`. Otherwise, execution is marked `completed` (partial errors are tolerated).
+
+#### Concurrency Safety
+
+Multiple `flow.step.ready` Kafka events for the same execution may be processed concurrently (e.g., 3 action nodes in a fan-out). Thread-safety is ensured by:
+- **Atomic MongoDB operations**: `findOneAndUpdate` with `$pull`/`$addToSet` on `pendingNodes` — each returns the document *after* the update
+- **No shared mutable state**: each concurrent call processes a different `nodeId`
+- **Deterministic completion**: the last concurrent call to empty `pendingNodes` triggers the completion check
+
+#### Fan-Out Example
+
+```
+[Trigger] → [Email₁] + [Email₂] + [SMS₁]   (3 outgoing edges)
+
+1. Trigger processes → advanceToNext adds [email₁, email₂, sms₁] to pendingNodes
+2. 3 Kafka events dispatched, processed concurrently:
+   - email₁ completes → pendingNodes=[email₂, sms₁] → not empty
+   - email₂ completes → pendingNodes=[sms₁] → not empty
+   - sms₁ completes → pendingNodes=[] → COMPLETE
+```
+
+#### Action Chaining Example
+
+```
+[Trigger] → [Email] → [Timer: 2h] → [SMS]
+
+1. Trigger → advanceToNext → pendingNodes=[email]
+2. Email processes → advanceToNext → pendingNodes=[email, timer] → completeNode(email) → pendingNodes=[timer]
+3. Timer schedules BullMQ job → pauses (stays in pendingNodes)
+4. Timer fires → FlowTimerProcessor → advanceToNext → pendingNodes=[timer, sms] → completeNode(timer) → pendingNodes=[sms]
+5. SMS processes → no outgoing edges → completeNode(sms) → pendingNodes=[] → COMPLETE
+```
 
 ## Kafka Topics
 
@@ -210,7 +277,7 @@ All topic names are defined in `src/kafka/topics.ts` (`KAFKA_TOPICS`):
 
 | Service | Responsibility |
 |---------|---------------|
-| FlowService | Flow CRUD, activation, graph validation (9 rules R-1..R-9) |
+| FlowService | Flow CRUD, activation, graph validation (19 rules: R-1..R-11 structural + R-12..R-19 semantic) |
 | FlowEngineService | DAG traversal and node execution orchestration |
 | TriggerService | Event → flow matching and enrollment |
 | ActionService | Action node execution: send_email, send_sms, outgoing_webhook |
@@ -264,7 +331,7 @@ This means restaurant operators don't need to know which status their staff uses
 
 When an order status changes, two Kafka event paths can fire `processOrderAsCompleted`:
 
-1. **`order.status_changed`** → `handleOrderStatusChanged()` checks if `newStatus` is in `ORDER_COMPLETED_QUALIFYING_STATUSES` → calls `processOrderAsCompleted()`
+1. **`order.status_changed`** → `handleOrderStatusChanged()` uses `upsertFromEvent()` (not `getByCustomerId()`) to ensure contacts are always created for first-time customers, then checks if `newStatus` is in `ORDER_COMPLETED_QUALIFYING_STATUSES` → calls `processOrderAsCompleted()`
 2. **`order.completed`** → `handleOrderCompleted()` → calls `processOrderAsCompleted()`
 
 Both paths converge on `processOrderAsCompleted()`, which uses `tryProcessEvent` to ensure it runs exactly once per order. Additionally, `TriggerService.evaluateSingleFlow` uses `hasOrderBeenProcessedForFlow` for per-flow dedup when `eventType === 'order_completed'` or `eventType === 'new_order'`.
@@ -295,6 +362,209 @@ payment.succeeded → handleNewOrder()
 
 - **`tryProcessEvent`** prevents double stats increment across two Kafka event paths (order.status_changed + order.completed both fire when status='completed')
 - **`hasOrderBeenProcessedForFlow`** prevents per-flow re-enrollment across multiple qualifying status changes (ready → delivered → completed all qualify) and ensures one new_order fire per order per flow
+
+## Payment Status Enforcement
+
+All order-related triggers require confirmed payment (`paymentStatus === 'paid'` or `paymentStatus === 'succeeded'`) before any trigger conditions are evaluated. This is a **universal guard** at the top of `TriggerService.checkTriggerConditions()` — it runs before orderTypes, minOrderTotal, and targetStatuses checks.
+
+### Triggers Requiring Payment
+
+| Trigger | Payment Required | Notes |
+|---------|-----------------|-------|
+| `order_completed` | Yes | Fires on fulfillment statuses — payment must be confirmed |
+| `first_order` | Yes | Same path as order_completed |
+| `nth_order` | Yes | Same path as order_completed |
+| `item_ordered` | Yes | Same path as order_completed |
+| `item_ordered_x_times` | Yes | Same path as order_completed |
+| `new_order` | Yes | Fires on payment.succeeded — paymentStatus will be 'succeeded' |
+| `order_status_changed` | Yes | Status changes for unpaid orders should NOT trigger CRM flows |
+| `abandoned_cart` | **Exempt** | Inherently targets pending/unpaid orders |
+| `no_order_in_x_days` | **Exempt** | Cron-based, no order context in payload |
+| `payment_failed` | **Exempt** | Fires on failed payments — payment guard does not apply |
+
+### Payment Status Normalization
+
+Stripe sends `'succeeded'` via webhook; the internal order system uses `'paid'`. The guard accepts **both** values with simple string comparison (`!== 'paid' && !== 'succeeded'`). Any other value (e.g., `'pending'`, `'failed'`, `undefined`) blocks the trigger.
+
+### Performance Benefit
+
+The payment guard runs at the **top** of `checkTriggerConditions()`, before expensive checks like item matching (`item_ordered`) or DB aggregations (`item_ordered_x_times`). Unpaid orders are rejected immediately without querying MongoDB.
+
+## Target Status Filtering
+
+Triggers can optionally restrict which order statuses they fire on using `config.targetStatuses: string[]`. This is a **generic check** in `TriggerService.checkTriggerConditions()` — it runs for any trigger that has `targetStatuses` set, not just a specific trigger type.
+
+### How It Works
+
+1. Read `config.targetStatuses` (array of status strings, e.g. `['delivered', 'completed']`)
+2. If the array is present and non-empty, get `actualStatus` from `payload.newStatus ?? payload.status`
+3. If `actualStatus` exists and is **NOT** in the `targetStatuses` array → return false (skip trigger)
+4. If `targetStatuses` is empty, undefined, or not an array → skip the check entirely (fire on any status — backward compatible default)
+
+### Backward Compatibility
+
+Legacy flows may have `config.targetStatus` (single string) instead of the new array format. Before the array check runs, the code converts:
+
+```
+if config.targetStatus is a non-empty string AND config.targetStatuses is NOT set:
+  effectiveTargetStatuses = [config.targetStatus]
+```
+
+This ensures existing `order_status_changed` flows with the old single-string config continue to work.
+
+### Which Triggers Use It
+
+| Trigger | targetStatuses | Notes |
+|---------|---------------|-------|
+| `item_ordered` | Optional | Filter by order status at time of trigger |
+| `item_ordered_x_times` | Optional | Filter by order status at time of trigger |
+| `order_status_changed` | Optional | Filter which status changes fire the trigger |
+| `order_completed` | Not used | Fires on qualifying fulfillment statuses via `processOrderAsCompleted` |
+| `first_order` | Not used | Same as order_completed |
+| `nth_order` | Not used | Same as order_completed |
+
+## order_status_changed — runOnce Toggle
+
+The `order_status_changed` trigger supports an optional `config.runOnce: boolean` that controls whether the flow fires once per order or on every matching status change.
+
+### Behavior
+
+| `config.runOnce` | Behavior |
+|-------------------|----------|
+| `true` | Flow fires only the **first time** the order matches a selected status. Subsequent status changes for the same order are blocked via `hasOrderBeenProcessedForFlow`. |
+| `false` / `undefined` / not set | Flow fires on **every** matching status change (default — backward compatible). The existing `isContactEnrolled` anti-spam check still applies. |
+
+### Implementation
+
+In `TriggerService.evaluateSingleFlow()`, after the standard order-level dedup block:
+
+```
+if eventType === 'order_status_changed' AND triggerNode.config.runOnce === true AND payload.orderId:
+  → hasOrderBeenProcessedForFlow(restaurantId, flowId, orderId)
+  → if already processed: skip with reason 'order_status_changed runOnce: order already processed'
+```
+
+### Dedup Mechanism
+
+`runOnce` uses the same `hasOrderBeenProcessedForFlow` method as `order_completed` and `new_order` — it queries `crm_flow_executions` for `{ restaurantId, flowId, 'context.orderId': orderId }` with no status filter. This provides permanent per-order dedup (unlike `isContactEnrolled` which only blocks while a flow is actively running).
+
+### Example
+
+```
+Flow: "Order Status Changed" with targetStatuses=['confirmed','ready'] + runOnce=true
+
+order → confirmed: trigger fires → flow enrolled ✓
+order → ready:     trigger fires → hasOrderBeenProcessedForFlow → already enrolled ✗ (runOnce blocks)
+```
+
+Without `runOnce`:
+```
+Flow: "Order Status Changed" with targetStatuses=['confirmed','ready'] + runOnce=false
+
+order → confirmed: trigger fires → flow enrolled ✓ (if not already enrolled via isContactEnrolled)
+order → ready:     trigger fires → flow enrolled ✓ (if previous execution completed)
+```
+
+## nth_order Trigger — Ordering Dependency
+
+The `nth_order` trigger fires exactly once when a customer's total completed orders reaches the configured threshold (`config.n`). This depends on a critical ordering invariant in `processOrderAsCompleted()`:
+
+```
+processOrderAsCompleted()
+  1. incrementOrderStats() → totalOrders includes current order ($inc + { new: true })
+  2. evaluateTriggers('nth_order', ..., { totalOrders: updatedContact.totalOrders })
+  3. TriggerService.checkTriggerConditions() → exact equality: totalOrders === config.n
+```
+
+**Key invariants:**
+- `incrementOrderStats()` is called **BEFORE** `evaluateTriggers()` — so `totalOrders` includes the current order when checked against `config.n`
+- The check uses `===` (exact equality, not `>=`) — ensures the trigger fires exactly once at the threshold, not on every subsequent order
+- `tryProcessEvent('order_completed_process:${orderId}')` prevents double-incrementing `totalOrders` for the same order
+- Only `processOrderAsCompleted()` increments `totalOrders` (not `handleNewOrder`) — so only paid/fulfilled orders count
+- The `first_order` trigger uses a separate `totalOrders === 1` check in `processOrderAsCompleted()` and does NOT go through `checkTriggerConditions`
+
+## item_ordered Trigger — Item Matching Logic
+
+The `item_ordered` trigger fires when an order contains specific menu items (with optional modifier matching). It evaluates in `processOrderAsCompleted()` alongside `order_completed`, `first_order`, and `nth_order`.
+
+```
+processOrderAsCompleted()
+  1. Fetch order items from DB (Order.findById) → payload.items[]
+  2. evaluateTriggers('item_ordered', ..., { items, ... })
+  3. TriggerService.checkTriggerConditions() → match config.items against payload.items
+```
+
+### Matching Algorithm
+
+1. **Config shape**: `config.items[]` — each has `{ menuItemId, menuItemName, modifiers?: [{ optionName, choiceNames }] }`
+2. **Payload shape**: `payload.items[]` — each has `{ menuItemId, name, options: [{ name, choice }] }`
+3. **Item match**: `String(orderItem.menuItemId) === String(configItem.menuItemId)`
+4. **Modifier match** (if config item has modifiers): ALL specified modifiers must match — for each modifier, the order item's `options[]` must contain an entry where `option.name === modifier.optionName` AND `option.choice` is in `modifier.choiceNames`
+5. **No modifiers**: If config item has no modifiers, menuItemId match alone is sufficient (any modifier combination accepted)
+6. **Match mode**: `'any'` (default) = at least one config item matches; `'all'` = every config item must match
+7. **Edge cases**: Empty `config.items` or empty `payload.items` → false (no match)
+
+### Order-Level Dedup
+
+The `item_ordered` trigger uses the same `hasOrderBeenProcessedForFlow` dedup as `order_completed` and `new_order` — one fire per order per flow.
+
+### Guard: Items Must Exist
+
+`evaluateTriggers('item_ordered', ...)` is only called when `items.length > 0` (i.e., order items were successfully fetched from DB). If the DB fetch fails, the trigger is skipped for that order.
+
+## item_ordered_x_times Trigger — Cumulative Counting
+
+The `item_ordered_x_times` trigger fires when a customer has ordered a specific menu item a cumulative number of times (paid orders only), reaching the configured threshold. It evaluates in `processOrderAsCompleted()` alongside `item_ordered`.
+
+### Two Counting Modes
+
+- **Once mode** (default, `config.resetOnThreshold = false/undefined`): Fires exactly once when threshold is reached. A `CrmTriggerAchievement` record is created; subsequent evaluations check for this record and skip immediately.
+- **Reset mode** (`config.resetOnThreshold = true`): Fires repeatedly. After reaching the threshold, counting resets from the achievement date. Example: threshold=5 fires on 5th, 10th, 15th order, etc.
+
+### Flow-Relative Counting
+
+Orders are counted from `flow.activatedAt` — only orders placed after the flow was activated count toward the threshold. This prevents pre-existing order history from immediately triggering newly activated flows.
+
+**Backward compatibility**: Legacy flows without `activatedAt` (activated before this feature) fall back to all-time counting with a warning log.
+
+```
+processOrderAsCompleted()
+  1. Fetch order items from DB (Order.findById) → payload.items[]
+  2. evaluateTriggers('item_ordered_x_times', ..., { items, restaurantId, ... })
+  3. TriggerService.checkTriggerConditions(triggerNode, payload, flow):
+     a. Early return: check current order contains matching config items
+     b. Determine sinceDate:
+        - Default: flow.activatedAt
+        - Reset mode + previous achievement: lastAchievement.achievedAt
+        - Once mode + previous achievement: return false (already fired)
+     c. For each matching item: countItemOrdersByCustomer(sinceDate) → count
+     d. Fire when count >= threshold (at-least match)
+     e. On match: create CrmTriggerAchievement record
+```
+
+### Counting Method: `countItemOrdersByCustomer()`
+
+MongoDB aggregation pipeline:
+1. `$match`: restaurantId + customerId + paymentStatus='paid' + createdAt >= sinceDate (when provided)
+2. `$unwind`: '$items'
+3. `$match`: 'items.menuItemId' = target menuItemId (ObjectId)
+4. If modifiers specified: `$match` with `$elemMatch` on 'items.options' for each modifier (name + choice)
+5. `$count`: 'total'
+
+**Performance**: Leverages index on `(restaurantId, customerId, paymentStatus)`. Adding `createdAt >= sinceDate` reduces scan range for established customers.
+
+### At-Least Threshold (`>=`)
+
+Uses `count >= threshold` instead of `===`. This handles edge cases where a single order pushes the count past the threshold (e.g., threshold=5, customer at 4, orders 2 items → count=6). The `CrmTriggerAchievement` record prevents re-firing in once mode; in reset mode, the sinceDate resets to the achievement date.
+
+### Match Mode
+
+- `'any'` (default): fire if ANY configured item reaches the threshold count
+- `'all'`: fire only if ALL configured items have each reached the threshold count
+
+### Dedup
+
+Uses `CrmTriggerAchievement` records for threshold dedup (once mode blocks re-firing, reset mode tracks sinceDate). Also uses `hasOrderBeenProcessedForFlow` for order-level dedup — one fire per order per flow.
 
 ## Time-Based Trigger Architecture
 
@@ -448,3 +718,156 @@ FlowEngineService.processCurrentNode() → case 'timer'
 |---------|--------|-------------|
 | `delay` | `{ duration: number, unit: 'minutes'\|'hours'\|'days' }` | `duration * unitMs` from now |
 | `date_field` | `{ targetDateUtc: string }` | Absolute UTC date/time (must be in the future) |
+
+## Email Delivery Pipeline
+
+Full trace from trigger to email delivery, including all validation points and failure modes:
+
+```
+Kafka event (order.completed / order.status_changed)
+  → OrderEventConsumer.processOrderAsCompleted()
+    1. tryProcessEvent('order_completed_process:${orderId}') — idempotency guard
+    2. contactService.upsertFromEvent() — ensure CRM contact exists
+    3. Fetch order from DB (Order.findById) — for items AND paymentStatus fallback
+       ⚠ FAILURE MODE: If DB fetch fails, items=[] and paymentStatus may be undefined
+       ⚠ FAILURE MODE: If item.options is not an array, defensive Array.isArray check prevents crash
+    4. Resolve paymentStatus: payload.paymentStatus ?? orderDoc.paymentStatus ?? orderDoc.payment.status
+       ⚠ FAILURE MODE: If none set, payment guard blocks ALL triggers
+    5. Build triggerContext with resolved paymentStatus + items
+    6. evaluateTriggers('item_ordered', ...) — only called when items.length > 0
+
+  → TriggerService.evaluateTriggers()
+    7. findActiveByTrigger(restaurantId, 'item_ordered') — queries nodes.subType at top level
+       ⚠ FAILURE MODE: If subType nested in data (React Flow format saved incorrectly), no flows found
+    8. evaluateSingleFlow() → checkTriggerConditions()
+       a. Payment guard: paymentStatus must be 'paid' or 'succeeded' — rejects undefined
+       b. Item matching: String(oi.menuItemId) === String(configItem.menuItemId)
+          Both sides produce 24-char hex strings (ObjectId → String)
+       c. targetStatuses check (optional)
+    9. Order-level dedup: hasOrderBeenProcessedForFlow()
+   10. Anti-spam: isContactEnrolled()
+   11. enrollContact() → create FlowExecution → processCurrentNode()
+
+  → FlowEngineService.processCurrentNode()
+   12. Load execution, flow, contact
+   13. Enrich context with restaurant data (_restaurant)
+   14. processNode() → case 'action' → ActionService.execute()
+
+  → ActionService.execute()
+   15. buildContext(contact, executionContext, restaurantData) — async, fetches items from DB if needed
+   16. executeSendEmail()
+       a. Resolve recipients: customer→contact.email, restaurant→restaurant.email, staff→user.email, custom→literal
+          ⚠ FAILURE MODE: Customer email null → warning logged, recipient skipped
+       b. If resolvedEmails is empty → returns { success: false } (not silent anymore)
+       c. Call CommunicationService.sendEmail()
+
+  → CommunicationService.sendEmail()
+   17. Validate recipients (filter empty)
+       ⚠ FAILURE MODE: All empty → creates 'skipped' log, returns early
+   18. Check emailOptIn — if contact opted out, skip with 'opted_out' reason
+   19. Interpolate subject + body with {{variable}} replacement
+   20. Create CommunicationLog (status: 'queued')
+   21. Send via MailgunProvider with retry (3 attempts)
+       ⚠ FAILURE MODE: Mailgun error → CommunicationLog updated to 'failed'
+   22. Update CommunicationLog to 'sent' on success
+```
+
+### Common Failure Points
+
+| # | Failure | Impact | Fix Applied |
+|---|---------|--------|-------------|
+| 3 | Order DB fetch fails | items=[], item triggers never fire | Warning logged, items checked before evaluating |
+| 4 | paymentStatus undefined | Payment guard blocks all triggers | Fallback chain: payload → orderDoc.paymentStatus → orderDoc.payment.status |
+| 7 | subType nested in data | No flows found for trigger | Transform layer in useFlowBuilderStore (fromReactFlowNodes) |
+| 16a | Customer email null | Recipient skipped, email not sent | Warning logged per recipient |
+| 16b | All recipients empty | Previously returned success silently | Now returns { success: false } with error message |
+
+## Action Failure Handling
+
+When an action node fails, the failure is recorded but **the flow continues** — sibling and downstream branches are not halted.
+
+### Per-Action Validation
+
+Each action type validates its configuration before execution:
+
+| Action | Check | Error |
+|--------|-------|-------|
+| `send_email` | No recipients resolved | `No recipients resolved — all recipient types returned empty` |
+| `send_email` | Subject empty/undefined | `Email subject is empty` |
+| `send_email` | Body empty/undefined | Warning logged, email still sent (empty body is valid but unusual) |
+| `send_sms` | Recipient phone empty | `No SMS recipient resolved` |
+| `send_sms` | Body empty | `SMS body is empty` |
+| `outgoing_webhook` | URL empty | `Webhook URL is empty` |
+| `outgoing_webhook` | URL doesn't start with http(s):// | `Webhook URL is invalid` |
+
+### Failure Flow
+
+```
+ActionService.execute() returns { success: false, error: '...' }
+  → FlowEngineService.processNode() logs failure to FlowExecutionLog
+  → executionRepo.errorNode() moves nodeId from pendingNodes to erroredNodes
+  → advanceToNext() still dispatches downstream nodes (flow continues)
+  → checkExecutionCompletion() determines final status:
+    - All branches errored → execution status: 'error'
+    - Some branches completed → execution status: 'completed' (partial errors tolerated)
+```
+
+### Where Failures Are Recorded
+
+| Location | What's Recorded |
+|----------|-----------------|
+| `crm_flow_execution_logs` | Per-node result: 'success' or 'failure' with error message |
+| `crm_flow_executions.erroredNodes[]` | Node IDs that failed |
+| `crm_communication_logs` | Per-email/SMS send status: 'sent', 'failed', 'skipped' with reason |
+
+## Trigger Achievements
+
+### Purpose
+
+The `crm_trigger_achievements` collection tracks when a contact reaches a cumulative trigger threshold (e.g., item_ordered_x_times). This enables two counting modes:
+
+- **Once mode** (default): The trigger fires exactly once when the threshold is reached. A TriggerAchievement record proves it already fired — subsequent evaluations skip immediately.
+- **Reset mode** (`config.resetOnThreshold = true`): After reaching the threshold, the counter resets. The trigger fires again on the 2nd, 3rd, etc. occurrence. `resetCount` tracks how many times.
+
+### Schema: `crm_trigger_achievements`
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `restaurantId` | ObjectId | Tenant isolation key |
+| `flowId` | ObjectId | Flow that owns the trigger |
+| `contactId` | ObjectId | Contact who reached the threshold |
+| `triggerNodeId` | String | Node ID within the flow |
+| `triggerSubType` | String | e.g., `item_ordered_x_times` |
+| `achievedAt` | Date | When the threshold was reached |
+| `count` | Number | Actual count at time of achievement |
+| `threshold` | Number | Configured threshold value |
+| `resetCount` | Number | How many times reset (reset mode only) |
+| `metadata` | Mixed | Additional context (items matched, etc.) |
+
+**Compound index**: `{ restaurantId, flowId, contactId, triggerNodeId }` for efficient lookups.
+
+### Flow `activatedAt` Field
+
+The `crm_flows.activatedAt` field records when a flow was first activated. It is:
+- `null` for draft flows
+- Set to `new Date()` on first activation
+- Preserved across pause/reactivate cycles (never overwritten)
+
+This field is used by `countItemOrdersByCustomer` to filter orders — only orders placed after the flow was activated are counted toward the threshold.
+
+## Semantic Validation Rules (R-12 through R-19)
+
+In addition to the 11 structural graph rules (R-1 through R-11), the flow validation enforces 8 semantic rules checking node configuration completeness. These rules are enforced on both client (`oc-restaurant-manager/lib/crm/flowValidation.ts`) and server (`oc-server/src/lib/flowValidation.ts`).
+
+| Rule | Description |
+|------|-------------|
+| R-12 | Email action must have at least one recipient (`config.recipients` non-empty array) |
+| R-13 | Email action must have a subject (`config.subject` non-empty after trim) |
+| R-14 | SMS action must have a body (`config.body` non-empty after trim) |
+| R-15 | SMS custom recipient must have a phone number (`config.recipient.phone` when type=custom) |
+| R-16 | Webhook action must have a valid URL (`config.url` starts with http:// or https://) |
+| R-17 | Item trigger must have at least one item (`config.items` non-empty for item_ordered / item_ordered_x_times) |
+| R-18 | Timer delay must have a positive duration (`config.duration` > 0 for delay timer) |
+| R-19 | Timer date_field must have a target date (`config.targetDateUtc` non-empty for date_field timer) |
+
+On validation failure: server returns `422 { error: 'INVALID_GRAPH', rule: 'R-N', message: '...' }`. Client shows toast with the error message.

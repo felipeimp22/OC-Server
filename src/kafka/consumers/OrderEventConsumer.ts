@@ -15,6 +15,7 @@ import { TriggerService } from '../../services/TriggerService.js';
 import { FlowRepository } from '../../repositories/FlowRepository.js';
 import { abandonedCartQueue } from './CartEventConsumer.js';
 import { tryProcessEvent } from '../../utils/idempotency.js';
+import { Order } from '../../domain/models/external/Order.js';
 import { createLogger } from '../../config/logger.js';
 
 const log = createLogger('OrderEventConsumer');
@@ -101,9 +102,6 @@ export class OrderEventConsumer {
           await this.handleNewOrder(payload, restaurantId);
           break;
 
-        case 'payment.failed':
-          await this.handlePaymentFailed(payload, restaurantId);
-          break;
 
         case 'payment.refunded':
           await this.handleOrderEvent('payment_refunded', payload, restaurantId);
@@ -175,7 +173,41 @@ export class OrderEventConsumer {
       orderTotal,
     );
 
-    // Build trigger context — events don't publish items
+    // Fetch order from DB for items AND paymentStatus fallback (events don't always publish these)
+    let items: Array<{ menuItemId: string; name: string; price: number; quantity: number; options: Array<{ name: string; choice: string; priceAdjustment: number }> }> = [];
+    let orderDoc: Record<string, any> | null = null;
+    if (orderId) {
+      try {
+        orderDoc = await Order.findById(orderId).lean().exec();
+        if (orderDoc?.items && Array.isArray(orderDoc.items)) {
+          items = orderDoc.items.map((item: any) => ({
+            menuItemId: String(item.menuItemId),
+            name: item.name,
+            price: item.price,
+            quantity: item.quantity,
+            options: Array.isArray(item.options) ? item.options.map((opt: any) => ({
+              name: opt.name,
+              choice: opt.choice,
+              priceAdjustment: opt.priceAdjustment ?? 0,
+            })) : [],
+          }));
+        }
+        if (items.length === 0) {
+          log.warn({ orderId }, 'Order items empty after fetch — item_ordered triggers will not fire');
+        }
+      } catch (err) {
+        log.warn({ err, orderId }, 'Failed to fetch order for trigger context — items and paymentStatus may be missing');
+      }
+    }
+
+    // Resolve paymentStatus: prefer Kafka payload, fall back to Order document
+    const resolvedPaymentStatus = (payload.paymentStatus as string | undefined)
+      ?? (orderDoc?.paymentStatus as string | undefined)
+      ?? (orderDoc?.payment?.status as string | undefined);
+    if (!resolvedPaymentStatus) {
+      log.warn({ orderId }, 'paymentStatus could not be resolved from payload or Order document — payment guard will block all triggers');
+    }
+
     const triggerContext = {
       orderId,
       orderNumber: payload.orderNumber as string | undefined,
@@ -185,8 +217,9 @@ export class OrderEventConsumer {
       customerPhone: payload.customerPhone as string | undefined,
       orderType: payload.orderType as string | undefined,
       orderTotal,
-      paymentStatus: payload.paymentStatus as string | undefined,
+      paymentStatus: resolvedPaymentStatus,
       status: payload.status as string | undefined,
+      items,
     };
 
     // Evaluate order_completed triggers
@@ -203,6 +236,18 @@ export class OrderEventConsumer {
       await this.triggerService.evaluateTriggers(restaurantId, 'nth_order', contact._id.toString(), {
         ...triggerContext,
         totalOrders: updatedContact.totalOrders,
+      });
+    }
+
+    // Item-ordered trigger: fires on the same order.completed event path when order contains configured menu items
+    if (items.length > 0) {
+      await this.triggerService.evaluateTriggers(restaurantId, 'item_ordered', contact._id.toString(), triggerContext);
+
+      // Item-ordered X times: cumulative counting trigger — fires exactly at threshold.
+      // Shares same item context; TriggerService checks lifetime count via DB aggregation.
+      await this.triggerService.evaluateTriggers(restaurantId, 'item_ordered_x_times', contact._id.toString(), {
+        ...triggerContext,
+        restaurantId,
       });
     }
 
@@ -226,8 +271,13 @@ export class OrderEventConsumer {
       return;
     }
 
-    const contact = await this.contactService.getByCustomerId(restaurantId, customerId);
-    if (!contact) return;
+    // Use upsertFromEvent instead of getByCustomerId — first-time customers
+    // placing their first order should still trigger order_status_changed flows
+    const contact = await this.contactService.upsertFromEvent(restaurantId, {
+      customerId,
+      name: payload.customerName as string | undefined,
+      email: payload.customerEmail as string | undefined,
+    });
 
     const newStatus = (payload.status ?? payload.newStatus) as string | undefined;
 
@@ -280,8 +330,32 @@ export class OrderEventConsumer {
       email: payload.customerEmail as string | undefined,
     });
 
+    // Fetch order items from DB for trigger context (events don't publish items)
+    const newOrderId = payload.orderId as string | undefined;
+    let newOrderItems: Array<{ menuItemId: string; name: string; price: number; quantity: number; options: Array<{ name: string; choice: string; priceAdjustment: number }> }> = [];
+    if (newOrderId) {
+      try {
+        const order = await Order.findById(newOrderId).lean().exec();
+        if (order?.items && Array.isArray(order.items)) {
+          newOrderItems = order.items.map((item: any) => ({
+            menuItemId: String(item.menuItemId),
+            name: item.name,
+            price: item.price,
+            quantity: item.quantity,
+            options: Array.isArray(item.options) ? item.options.map((opt: any) => ({
+              name: opt.name,
+              choice: opt.choice,
+              priceAdjustment: opt.priceAdjustment ?? 0,
+            })) : [],
+          }));
+        }
+      } catch (err) {
+        log.warn({ err, orderId: newOrderId }, 'Failed to fetch order items for new_order trigger context');
+      }
+    }
+
     const triggerContext = {
-      orderId: payload.orderId as string | undefined,
+      orderId: newOrderId,
       orderNumber: payload.orderNumber as string | undefined,
       customerId,
       customerEmail: payload.customerEmail as string | undefined,
@@ -291,6 +365,7 @@ export class OrderEventConsumer {
       orderTotal: (payload.orderTotal as number) ?? 0,
       paymentStatus: payload.paymentStatus as string | undefined,
       paymentMethod: payload.paymentMethod as string | undefined,
+      items: newOrderItems,
     };
 
     // Evaluate new_order triggers
@@ -304,39 +379,6 @@ export class OrderEventConsumer {
     if (orderId) {
       await this.cancelAbandonedCartJobs(restaurantId, orderId);
     }
-  }
-
-  /**
-   * Handle payment.failed — evaluate payment_failed triggers.
-   */
-  private async handlePaymentFailed(
-    payload: Record<string, unknown>,
-    eventRestaurantId?: string,
-  ): Promise<void> {
-    const restaurantId = (eventRestaurantId ?? payload.restaurantId) as string;
-    const customerId = payload.customerId as string;
-
-    if (!restaurantId || !customerId) {
-      log.warn({ restaurantId, customerId }, 'payment.failed missing restaurantId or customerId — skipping');
-      return;
-    }
-
-    const contact = await this.contactService.getByCustomerId(restaurantId, customerId);
-    if (!contact) {
-      log.warn({ restaurantId, customerId }, 'No contact found for payment.failed event — skipping');
-      return;
-    }
-
-    await this.triggerService.evaluateTriggers(restaurantId, 'payment_failed', contact._id.toString(), {
-      orderId: payload.orderId as string | undefined,
-      orderNumber: payload.orderNumber as string | undefined,
-      customerId,
-      customerEmail: payload.customerEmail as string | undefined,
-      customerName: payload.customerName as string | undefined,
-      orderTotal: payload.orderTotal as number | undefined,
-      paymentStatus: payload.paymentStatus as string | undefined,
-      failureReason: (payload.failureReason ?? payload.failure_reason) as string | undefined,
-    });
   }
 
   /**

@@ -216,10 +216,12 @@ Email/SMS inline composers use `{{dot.notation}}` variables scoped to the trigge
 |---------|---------------------|
 | `new_order` (fires on payment.succeeded — uses upsertFromEvent for first-time customers, does NOT increment stats) | `{{order.total}}`, `{{order.number}}`, `{{payment.method}}` |
 | `order_completed` (fires once on first qualifying fulfillment status: ready, out_for_delivery, delivered, completed), `first_order`, `nth_order` | `{{order.total}}`, `{{order.number}}`, `{{order.items_summary}}`, `{{order.date}}` |
-| `payment_failed` | `{{order.total}}`, `{{order.number}}`, `{{payment.failure_reason}}` |
-| `order_status_changed` (supports `config.targetStatus` filter — if set, fires only when `newStatus` matches; if empty/unset, fires on every status change) | `{{order.number}}`, `{{order.status}}` |
+| `order_status_changed` (supports `config.targetStatuses: string[]` filter — if set, fires only when `newStatus` is in the array; if empty/unset, fires on every status change. `config.runOnce: boolean` controls per-order dedup.) | `{{order.number}}`, `{{order.status}}` |
 | `abandoned_cart` | `{{cart.items_summary}}`, `{{cart.total}}`, `{{cart.abandon_time}}` |
 | `no_order_in_x_days` | `{{customer.last_order_date}}`, `{{customer.days_since_order}}` |
+| `item_ordered` | `{{order.total}}`, `{{order.number}}`, `{{order.items_summary}}`, `{{order.date}}`, `{{matched_item.name}}`, `{{matched_item.price}}` |
+| `item_ordered_x_times` | `{{order.total}}`, `{{order.number}}`, `{{order.items_summary}}`, `{{order.date}}`, `{{matched_item.name}}`, `{{matched_item.total_orders}}` |
+| `payment_failed` (backend-only trigger — not configurable in the flow builder UI) | `{{order.total}}`, `{{order.number}}`, `{{order.items_summary}}`, `{{order.date}}` |
 
 #### Variable Resolution Notes
 
@@ -232,6 +234,14 @@ Unknown variables are replaced with an empty string.
 
 ---
 
+## Payment Status Enforcement
+
+> **Important:** All order-related triggers (`order_completed`, `first_order`, `nth_order`, `item_ordered`, `item_ordered_x_times`, `new_order`, `order_status_changed`) require `paymentStatus` to be `'paid'` or `'succeeded'` in the event payload. If payment is not confirmed, the trigger is silently skipped. Exempt triggers: `abandoned_cart` (targets unpaid orders), `no_order_in_x_days` (cron-based, no order context), and `payment_failed` (fires on failed payments).
+>
+> Ensure your event payloads include `paymentStatus` when publishing order-related events.
+>
+> **paymentStatus resolution:** If `paymentStatus` is missing from the Kafka event payload, `processOrderAsCompleted` falls back to fetching it from the Order document: `payload.paymentStatus ?? orderDoc.paymentStatus ?? orderDoc.payment.status`. This prevents triggers from being silently blocked when the Kafka publisher doesn't include the field.
+
 ## Trigger Config Keys
 
 Each trigger node stores its configuration in `node.config`. The backend reads these keys when evaluating triggers.
@@ -241,11 +251,23 @@ Each trigger node stores its configuration in `node.config`. The backend reads t
 | `order_completed` | `minOrderTotal` | `number` | — | `TriggerService.checkTriggerConditions()` |
 | `nth_order` | `n` | `number` | 5 | `TriggerService.checkTriggerConditions()` |
 | `no_order_in_x_days` | `days` | `number` | 30 | `InactivityChecker.ts` (line ~72) |
-| `order_status_changed` | `targetStatus` | `string` | — (any) | `TriggerService.checkTriggerConditions()` |
-| `payment_failed` | — | — | — | — |
+| `order_status_changed` | `targetStatuses` | `string[]` | — (any) | `TriggerService.checkTriggerConditions()` — array of statuses to match. Empty/undefined = any status change. Legacy `targetStatus` (string) is auto-converted to `[targetStatus]`. |
+| `order_status_changed` | `runOnce` | `boolean` | `false` | `TriggerService.evaluateSingleFlow()` — when true, fires only once per order (permanent dedup via `hasOrderBeenProcessedForFlow`). |
 | `abandoned_cart` | `delayDays` | `number` | 1 | `CartEventConsumer.handleCartAbandoned()` — schedules BullMQ delayed job with `delayDays * 86400000` ms delay (1–90 days) |
 | `first_order` | — | — | — | — |
 | `new_order` | — | — | — | — |
+| `item_ordered` | `items` | `Array<{ menuItemId, menuItemName, modifiers?[] }>` | — | `TriggerService.checkTriggerConditions()` |
+| `item_ordered` | `matchMode` | `'any' \| 'all'` | `'any'` | `TriggerService.checkTriggerConditions()` |
+| `item_ordered` | `targetStatuses` | `string[]` | — (any) | `TriggerService.checkTriggerConditions()` — optional filter by order status at time of trigger. |
+| `item_ordered_x_times` | `items` | `Array<{ menuItemId, menuItemName, modifiers?[] }>` | — | `TriggerService.checkTriggerConditions()` |
+| `item_ordered_x_times` | `matchMode` | `'any' \| 'all'` | `'any'` | `TriggerService.checkTriggerConditions()` |
+| `item_ordered_x_times` | `threshold` | `number` (min 2) | — | `TriggerService.checkTriggerConditions()` |
+| `item_ordered_x_times` | `resetOnThreshold` | `boolean` | `false` | When `true`, counter resets after reaching threshold (fires repeatedly at intervals). When `false` (default), fires exactly once. |
+| `item_ordered_x_times` | `targetStatuses` | `string[]` | — (any) | `TriggerService.checkTriggerConditions()` — optional filter by order status at time of trigger. |
+
+> **Counting from activation:** The `item_ordered_x_times` trigger counts orders from `flow.activatedAt` — the date when the flow was first activated. Historical orders placed before activation are not counted toward the threshold. Legacy flows without `activatedAt` fall back to all-time counting.
+
+> **Action failure handling:** When an action node (email, SMS, webhook) fails validation or execution, the failure is logged on the `FlowExecutionLog` and the node is moved to `erroredNodes[]`. The flow continues to advance — action failures do not halt the entire flow.
 
 ---
 
@@ -265,6 +287,21 @@ involves two separate delay mechanisms:
 2. **Timer node delay** (`flow-timers` queue): 2 hour wait during execution — configured via `config.duration` + `config.unit`
 
 Total time from cart abandonment to email: ~26 hours. The two delays are independent and use different BullMQ queues.
+
+---
+
+## Email Recipient Resolution
+
+When an email action executes, `ActionService.executeSendEmail()` resolves recipients from the `config.recipients` array:
+
+| Recipient Type | Resolution | Fallback |
+|----------------|-----------|----------|
+| `customer` | `contact.email` | Warning logged if null — recipient skipped |
+| `restaurant` | `restaurant.email` (from `_restaurant` context) | — |
+| `staff` | Fetches user by `recipient.userId` → `user.email` | Warning logged if user not found |
+| `custom` | `recipient.email` (literal string from config) | — |
+
+**Failure handling:** If all recipients resolve to empty (no valid emails), `ActionService` returns `{ success: false, error: 'No recipients resolved — all recipient types returned empty' }`. This failure is logged on the `FlowExecutionLog` and the node moves to `erroredNodes[]`. The flow continues to advance.
 
 ---
 

@@ -30,6 +30,12 @@ export interface IFlowExecutionDocument extends Document {
   status: FlowExecutionStatus;
   /** Which node the contact is currently at (null if completed/stopped) */
   currentNodeId: string | null;
+  /** Node IDs currently being processed (fan-out: multiple nodes may execute in parallel) */
+  pendingNodes: string[];
+  /** Node IDs that have finished processing successfully */
+  completedNodes: string[];
+  /** Node IDs that failed during processing (sibling branches continue) */
+  erroredNodes: string[];
   /** When the execution started (enrollment time) */
   startedAt: Date;
   /** When the execution finished (completed, stopped, or errored) */
@@ -59,6 +65,9 @@ const FlowExecutionSchema = new Schema<IFlowExecutionDocument>(
       default: 'active',
     },
     currentNodeId: { type: String, default: null },
+    pendingNodes: { type: [String], default: [] },
+    completedNodes: { type: [String], default: [] },
+    erroredNodes: { type: [String], default: [] },
     startedAt: { type: Date, default: () => new Date() },
     completedAt: { type: Date, default: null },
     nextExecutionAt: { type: Date, default: null },

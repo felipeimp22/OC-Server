@@ -13,10 +13,13 @@
 import { FlowService } from './FlowService.js';
 import { FlowExecutionRepository } from '../repositories/FlowExecutionRepository.js';
 import { FlowExecutionLogRepository } from '../repositories/FlowExecutionLogRepository.js';
+import { TriggerAchievementRepository } from '../repositories/TriggerAchievementRepository.js';
 import { FlowEngineService } from './FlowEngineService.js';
 import type { IFlowDocument, IFlowNode } from '../domain/models/crm/Flow.js';
 import type { IFlowExecutionDocument } from '../domain/models/crm/FlowExecution.js';
 import type { ICRMEventPayload } from '../domain/interfaces/IEvent.js';
+import { Order } from '../domain/models/external/Order.js';
+import mongoose from 'mongoose';
 import { createLogger } from '../config/logger.js';
 
 const log = createLogger('TriggerService');
@@ -33,11 +36,13 @@ export class TriggerService {
   private readonly flowService: FlowService;
   private readonly executionRepo: FlowExecutionRepository;
   private readonly logRepo: FlowExecutionLogRepository;
+  private readonly achievementRepo: TriggerAchievementRepository;
 
   constructor() {
     this.flowService = new FlowService();
     this.executionRepo = new FlowExecutionRepository();
     this.logRepo = new FlowExecutionLogRepository();
+    this.achievementRepo = new TriggerAchievementRepository();
   }
 
   /**
@@ -97,13 +102,13 @@ export class TriggerService {
     }
 
     // Check trigger conditions (e.g., orderTypes filter)
-    if (!this.checkTriggerConditions(triggerNode, payload)) {
+    if (!(await this.checkTriggerConditions(triggerNode, payload, flow))) {
       log.info({ flowId, contactId, config: triggerNode.config, payloadStatus: payload.paymentStatus ?? payload.newStatus }, 'Trigger conditions not met');
       return { flowId, flowName: flow.name, enrolled: false, reason: 'Trigger conditions not met' };
     }
 
-    // Order-level dedup: for order_completed and new_order, check if this order was already processed for this flow
-    if ((eventType === 'order_completed' || eventType === 'new_order') && payload.orderId) {
+    // Order-level dedup: for order-based triggers, check if this order was already processed for this flow
+    if ((eventType === 'order_completed' || eventType === 'new_order' || eventType === 'item_ordered' || eventType === 'item_ordered_x_times') && payload.orderId) {
       const alreadyProcessed = await this.executionRepo.hasOrderBeenProcessedForFlow(
         restaurantId,
         flowId,
@@ -112,6 +117,21 @@ export class TriggerService {
       if (alreadyProcessed) {
         log.info({ flowId, contactId, orderId: payload.orderId }, 'Order already processed for this flow — skipping');
         return { flowId, flowName: flow.name, enrolled: false, reason: 'Order already processed for this flow' };
+      }
+    }
+
+    // order_status_changed runOnce: optional per-order dedup.
+    // When config.runOnce is true, the flow fires only once per order (permanent dedup via hasOrderBeenProcessedForFlow).
+    // When config.runOnce is false/undefined, fire on every matching status change (existing isContactEnrolled still applies).
+    if (eventType === 'order_status_changed' && triggerNode.config?.runOnce === true && payload.orderId) {
+      const alreadyProcessed = await this.executionRepo.hasOrderBeenProcessedForFlow(
+        restaurantId,
+        flowId,
+        payload.orderId as string,
+      );
+      if (alreadyProcessed) {
+        log.info({ flowId, contactId, orderId: payload.orderId }, 'order_status_changed runOnce: order already processed');
+        return { flowId, flowName: flow.name, enrolled: false, reason: 'order_status_changed runOnce: order already processed' };
       }
     }
 
@@ -156,7 +176,7 @@ export class TriggerService {
   /**
    * Check if the event payload matches the trigger node's conditions.
    */
-  private checkTriggerConditions(triggerNode: IFlowNode, payload: ICRMEventPayload): boolean {
+  private async checkTriggerConditions(triggerNode: IFlowNode, payload: ICRMEventPayload, flow?: IFlowDocument): Promise<boolean> {
     const config = triggerNode.config;
 
     // Resolve effective payment status from multiple possible payload fields
@@ -166,6 +186,23 @@ export class TriggerService {
       { config, orderType: payload.orderType, rawPaymentStatus, orderTotal: payload.orderTotal },
       'Checking trigger conditions',
     );
+
+    // Universal payment guard — all order-related triggers require confirmed payment.
+    // Exempt: abandoned_cart (pending orders), no_order_in_x_days (cron-based, no order context).
+    const PAYMENT_REQUIRED_TRIGGERS = [
+      'order_completed', 'first_order', 'nth_order', 'item_ordered',
+      'item_ordered_x_times', 'new_order', 'order_status_changed',
+    ];
+    if (PAYMENT_REQUIRED_TRIGGERS.includes(triggerNode.subType)) {
+      const paymentStatus = payload.paymentStatus as string | undefined;
+      if (paymentStatus !== 'paid' && paymentStatus !== 'succeeded') {
+        log.info(
+          { subType: triggerNode.subType, paymentStatus },
+          `Skipping trigger: payment not confirmed (paymentStatus=${paymentStatus})`,
+        );
+        return false;
+      }
+    }
 
     // Check orderTypes filter
     if (config.orderTypes && Array.isArray(config.orderTypes) && config.orderTypes.length > 0) {
@@ -197,13 +234,224 @@ export class TriggerService {
       }
     }
 
-    // Check targetStatus filter (order_status_changed trigger — fire only for configured status)
-    if (config.targetStatus && typeof config.targetStatus === 'string' && config.targetStatus !== '') {
+    // nth_order: fire exactly once when contact's totalOrders reaches config.n.
+    // nth_order depends on contact.totalOrders being incremented in
+    // processOrderAsCompleted() BEFORE this evaluation. Count includes current order.
+    if (triggerNode.subType === 'nth_order') {
+      const n = config.n as number | undefined;
+      const totalOrders = payload.totalOrders as number | undefined;
+      if (n == null || totalOrders == null || totalOrders !== n) {
+        log.info({ n, totalOrders, reason: 'nth_order threshold not met (requires exact match)' }, 'nth_order check failed');
+        return false;
+      }
+    }
+
+    // item_ordered: match order items against configured menu items with optional modifier filtering.
+    // Uses payload.items (fetched from DB in OrderEventConsumer.processOrderAsCompleted()).
+    if (triggerNode.subType === 'item_ordered') {
+      const configItems = config.items as Array<{ menuItemId: string; menuItemName: string; modifiers?: Array<{ optionName: string; choiceNames: string[] }> }> | undefined;
+      const matchMode = (config.matchMode as string) ?? 'any';
+      const orderItems = payload.items as Array<{ menuItemId: string; name: string; options?: Array<{ name: string; choice: string }> }> | undefined;
+
+      if (!configItems || configItems.length === 0 || !orderItems || orderItems.length === 0) {
+        log.info({ reason: 'item_ordered: empty config.items or payload.items' }, 'item_ordered check failed');
+        return false;
+      }
+
+      const itemMatches = configItems.map((configItem) => {
+        // Find order item with matching menuItemId (string comparison)
+        const matchingOrderItem = orderItems.find(
+          (oi) => String(oi.menuItemId) === String(configItem.menuItemId),
+        );
+        if (!matchingOrderItem) return false;
+
+        // If config has modifiers, ALL specified modifiers must match
+        if (configItem.modifiers && configItem.modifiers.length > 0) {
+          const orderOptions = matchingOrderItem.options ?? [];
+          return configItem.modifiers.every((modifier) => {
+            // Find an order option matching the modifier's option name
+            return orderOptions.some(
+              (opt) =>
+                opt.name === modifier.optionName &&
+                modifier.choiceNames.includes(opt.choice),
+            );
+          });
+        }
+
+        // No modifiers specified — menuItemId match is sufficient
+        return true;
+      });
+
+      const passes = matchMode === 'all'
+        ? itemMatches.every(Boolean)
+        : itemMatches.some(Boolean);
+
+      if (!passes) {
+        log.info({ matchMode, itemMatches, reason: 'item_ordered: item match failed' }, 'item_ordered check failed');
+        return false;
+      }
+    }
+
+    // item_ordered_x_times: cumulative counting with flow-relative date and two modes:
+    // - Once mode (default): fires exactly once when threshold is reached
+    // - Reset mode (config.resetOnThreshold = true): fires repeatedly, resetting count each time
+    // Counts orders from flow.activatedAt (or all-time for legacy flows without activatedAt).
+    if (triggerNode.subType === 'item_ordered_x_times') {
+      const configItems = config.items as Array<{ menuItemId: string; menuItemName: string; modifiers?: Array<{ optionName: string; choiceNames: string[] }> }> | undefined;
+      const matchMode = (config.matchMode as string) ?? 'any';
+      const threshold = config.threshold as number | undefined;
+      const resetOnThreshold = config.resetOnThreshold === true;
+      const orderItems = payload.items as Array<{ menuItemId: string; name: string; options?: Array<{ name: string; choice: string }> }> | undefined;
+
+      if (!configItems || configItems.length === 0 || !orderItems || orderItems.length === 0) {
+        log.info({ reason: 'item_ordered_x_times: empty config.items or payload.items' }, 'item_ordered_x_times check failed');
+        return false;
+      }
+      if (!threshold || threshold < 1) {
+        log.info({ threshold, reason: 'item_ordered_x_times: invalid threshold' }, 'item_ordered_x_times check failed');
+        return false;
+      }
+
+      // Early return: check if current order contains any matching config items
+      const currentOrderMatches = configItems.map((configItem) => {
+        const matchingOrderItem = orderItems.find(
+          (oi) => String(oi.menuItemId) === String(configItem.menuItemId),
+        );
+        if (!matchingOrderItem) return false;
+
+        if (configItem.modifiers && configItem.modifiers.length > 0) {
+          const orderOptions = matchingOrderItem.options ?? [];
+          return configItem.modifiers.every((modifier) => {
+            return orderOptions.some(
+              (opt) =>
+                opt.name === modifier.optionName &&
+                modifier.choiceNames.includes(opt.choice),
+            );
+          });
+        }
+        return true;
+      });
+
+      const hasAnyCurrentMatch = currentOrderMatches.some(Boolean);
+      if (!hasAnyCurrentMatch) {
+        log.info({ reason: 'item_ordered_x_times: no matching items in current order' }, 'item_ordered_x_times check failed');
+        return false;
+      }
+
+      const restaurantId = payload.restaurantId as string | undefined;
+      const customerId = payload.customerId as string | undefined;
+      if (!restaurantId || !customerId) {
+        log.info({ reason: 'item_ordered_x_times: missing restaurantId or customerId' }, 'item_ordered_x_times check failed');
+        return false;
+      }
+
+      // Determine sinceDate: flow.activatedAt or last achievement date (for reset mode)
+      let sinceDate: Date | undefined;
+      const flowId = flow?._id.toString();
+      const contactId = payload.customerId as string;
+
+      if (flow?.activatedAt) {
+        sinceDate = flow.activatedAt;
+      } else {
+        log.warn({ flowId }, 'Flow missing activatedAt — using all-time counting for item_ordered_x_times');
+      }
+
+      // Check for existing achievement
+      let lastAchievement = null;
+      if (flowId && contactId) {
+        lastAchievement = await this.achievementRepo.findLatest(
+          restaurantId,
+          flowId,
+          contactId,
+          triggerNode.id,
+        );
+      }
+
+      if (lastAchievement) {
+        if (resetOnThreshold) {
+          // Reset mode: count from last achievement date
+          sinceDate = lastAchievement.achievedAt;
+          log.info({ flowId, contactId, sinceDateReset: sinceDate }, 'item_ordered_x_times: reset mode — counting from last achievement');
+        } else {
+          // Once mode: already fired, skip
+          log.info({ flowId, contactId, achievedAt: lastAchievement.achievedAt }, 'item_ordered_x_times: once mode — already achieved, skipping');
+          return false;
+        }
+      }
+
+      // Count orders containing each matching config item since sinceDate
+      const thresholdResults = await Promise.all(
+        configItems.map(async (configItem, idx) => {
+          if (!currentOrderMatches[idx]) return false;
+          const count = await this.countItemOrdersByCustomer(
+            restaurantId,
+            customerId,
+            configItem.menuItemId,
+            configItem.modifiers,
+            sinceDate,
+          );
+          log.info(
+            { menuItemId: configItem.menuItemId, count, threshold, sinceDate },
+            'item_ordered_x_times: count for item',
+          );
+          return count >= threshold;
+        }),
+      );
+
+      const passes = matchMode === 'all'
+        ? thresholdResults.every(Boolean)
+        : thresholdResults.some(Boolean);
+
+      if (!passes) {
+        log.info({ matchMode, thresholdResults, reason: 'item_ordered_x_times: threshold not met' }, 'item_ordered_x_times check failed');
+        return false;
+      }
+
+      // Threshold met — create achievement record
+      if (flowId) {
+        try {
+          await this.achievementRepo.create({
+            restaurantId,
+            flowId,
+            contactId,
+            triggerNodeId: triggerNode.id,
+            triggerSubType: 'item_ordered_x_times',
+            achievedAt: new Date(),
+            count: threshold, // At least threshold
+            threshold,
+            metadata: { matchMode, configItems: configItems.map((i) => i.menuItemId) },
+          } as any);
+
+          // If reset mode and previous achievement exists, increment its resetCount
+          if (resetOnThreshold && lastAchievement) {
+            await this.achievementRepo.incrementResetCount(lastAchievement._id);
+          }
+
+          log.info({ flowId, contactId, threshold, resetOnThreshold }, 'item_ordered_x_times: achievement recorded');
+        } catch (err) {
+          log.warn({ err, flowId, contactId }, 'Failed to create trigger achievement — trigger will still fire');
+        }
+      }
+    }
+
+    // Target status filtering — generic check for any trigger with config.targetStatuses.
+    // Backward compat: convert legacy single-string config.targetStatus to array format.
+    let effectiveTargetStatuses = config.targetStatuses as string[] | undefined;
+    if (
+      (!effectiveTargetStatuses || !Array.isArray(effectiveTargetStatuses) || effectiveTargetStatuses.length === 0) &&
+      config.targetStatus &&
+      typeof config.targetStatus === 'string' &&
+      config.targetStatus !== ''
+    ) {
+      effectiveTargetStatuses = [config.targetStatus];
+    }
+
+    if (effectiveTargetStatuses && Array.isArray(effectiveTargetStatuses) && effectiveTargetStatuses.length > 0) {
       const actualStatus = (payload.newStatus ?? (payload as any).status) as string | undefined;
-      if (actualStatus && config.targetStatus !== actualStatus) {
+      if (actualStatus && !effectiveTargetStatuses.includes(actualStatus)) {
         log.info(
-          { configuredStatus: config.targetStatus, actualStatus, reason: 'targetStatus mismatch' },
-          'targetStatus mismatch',
+          { configuredStatuses: effectiveTargetStatuses, actualStatus, reason: 'targetStatuses mismatch' },
+          'targetStatuses mismatch',
         );
         return false;
       }
@@ -211,6 +459,64 @@ export class TriggerService {
 
     log.info('All trigger conditions passed');
     return true;
+  }
+
+  /**
+   * Count the number of paid orders containing a specific menu item for a customer.
+   * Uses MongoDB aggregation: $match by restaurant+customer+paid, $unwind items,
+   * $match by menuItemId (and optional modifier filter), $count.
+   *
+   * The count includes the current order since the order is already saved to DB
+   * by the time triggers evaluate in processOrderAsCompleted().
+   */
+  private async countItemOrdersByCustomer(
+    restaurantId: string,
+    customerId: string,
+    menuItemId: string,
+    modifiers?: Array<{ optionName: string; choiceNames: string[] }>,
+    sinceDate?: Date,
+  ): Promise<number> {
+    const matchFilter: Record<string, unknown> = {
+      restaurantId: new mongoose.Types.ObjectId(restaurantId),
+      customerId: new mongoose.Types.ObjectId(customerId),
+      paymentStatus: 'paid',
+    };
+
+    // Filter to orders placed after sinceDate (flow activation or last achievement)
+    if (sinceDate) {
+      matchFilter.createdAt = { $gte: sinceDate };
+    }
+
+    const pipeline: any[] = [
+      { $match: matchFilter },
+      { $unwind: '$items' },
+      {
+        $match: {
+          'items.menuItemId': new mongoose.Types.ObjectId(menuItemId),
+        },
+      },
+    ];
+
+    // If modifiers are specified, add a $match stage for each modifier requirement
+    if (modifiers && modifiers.length > 0) {
+      for (const modifier of modifiers) {
+        pipeline.push({
+          $match: {
+            'items.options': {
+              $elemMatch: {
+                name: modifier.optionName,
+                choice: { $in: modifier.choiceNames },
+              },
+            },
+          },
+        });
+      }
+    }
+
+    pipeline.push({ $count: 'total' });
+
+    const result = await Order.aggregate(pipeline).exec();
+    return result.length > 0 ? result[0].total : 0;
   }
 
   /**

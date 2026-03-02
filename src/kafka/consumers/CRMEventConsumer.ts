@@ -57,21 +57,25 @@ export class CRMEventConsumer {
 
   /**
    * Handle flow.step.ready events.
+   * For fan-out: each event carries a nextNodeId specifying which node to process.
+   * Multiple concurrent events for the same execution process different nodes in parallel.
    */
   private async handleFlowExecute(event: Record<string, unknown>): Promise<void> {
     const eventType = event.eventType as string;
     const executionId = event.executionId as string;
+    const nextNodeId = event.nextNodeId as string | undefined;
 
     if (!executionId) {
       log.warn({ event }, 'Missing executionId in flow execute event');
       return;
     }
 
-    log.info({ eventType, executionId }, 'Processing flow execution event');
+    log.info({ eventType, executionId, nextNodeId }, 'Processing flow execution event');
 
     switch (eventType) {
       case 'flow.step.ready':
-        await this.flowEngine.processCurrentNode(executionId);
+        // Pass nextNodeId so the engine processes the specific node (fan-out support)
+        await this.flowEngine.processCurrentNode(executionId, nextNodeId);
         break;
 
       default:

@@ -1,6 +1,6 @@
 /**
  * @fileoverview Server-side flow graph validation.
- * Enforces the 9 structural rules for CRM automation flows.
+ * Enforces the 11 structural rules for CRM automation flows.
  *
  * @module lib/flowValidation
  */
@@ -23,7 +23,7 @@ export class FlowValidationError extends Error {
 }
 
 /**
- * Validate a flow graph against the 10 structural rules.
+ * Validate a flow graph against the 11 structural rules.
  */
 export function validateFlowGraph(
   nodes: IFlowNode[],
@@ -61,19 +61,9 @@ export function validateFlowGraph(
     return { valid: false, rule: 'R-5', message: 'Flow contains a cycle, which is not allowed.' };
   }
 
-  // ── R-4: Action nodes have no outgoing edges ───────────────────────
-  for (const node of nodes) {
-    if (node.type === 'action') {
-      const out = outEdges.get(node.id) ?? [];
-      if (out.length > 0) {
-        return {
-          valid: false,
-          rule: 'R-4',
-          message: `Action node "${node.label || node.id}" must be terminal (no outgoing edges).`,
-        };
-      }
-    }
-  }
+  // ── R-4: Action nodes MAY have outgoing edges (action chaining/fan-out).
+  // Action nodes with zero outgoing edges are still valid (terminal).
+  // No validation needed — outgoing edges from actions are allowed.
 
   // ── R-7: Timer has exactly one incoming and one outgoing edge ──────
   for (const node of nodes) {
@@ -98,7 +88,7 @@ export function validateFlowGraph(
   }
 
   // ── R-6: yes_no condition has exactly 2 outgoing edges (yes + no) ──
-  // Both branches must terminate in an action node (optionally preceded by a timer)
+  // Both branches must eventually terminate in an action node (may pass through timers or other actions first)
   for (const node of nodes) {
     if (node.type === 'condition' && node.subType === 'yes_no') {
       const out = outEdges.get(node.id) ?? [];
@@ -118,7 +108,7 @@ export function validateFlowGraph(
           message: `Yes/No condition "${node.label || node.id}" must have "yes" and "no" outgoing handles.`,
         };
       }
-      // Validate each branch: timer? → action
+      // Validate each branch: DFS to verify every leaf node is an action
       for (const edge of out) {
         const target = nodeById.get(edge.targetNodeId);
         if (!target) continue;
@@ -130,18 +120,25 @@ export function validateFlowGraph(
     }
   }
 
-  // ── R-2: yes_no condition only at depth 1 from trigger ─────────────
-  // Depth 1 = direct children of the trigger node
+  // ── R-2: yes_no condition as direct child of trigger OR action node ─
   const triggerChildren = new Set(
     (outEdges.get(triggerNode.id) ?? []).map((e) => e.targetNodeId),
   );
+  const actionChildren = new Set<string>();
+  for (const node of nodes) {
+    if (node.type === 'action') {
+      for (const edge of outEdges.get(node.id) ?? []) {
+        actionChildren.add(edge.targetNodeId);
+      }
+    }
+  }
   for (const node of nodes) {
     if (node.type === 'condition' && node.subType === 'yes_no') {
-      if (!triggerChildren.has(node.id)) {
+      if (!triggerChildren.has(node.id) && !actionChildren.has(node.id)) {
         return {
           valid: false,
           rule: 'R-2',
-          message: `Yes/No condition "${node.label || node.id}" must be a direct child of the trigger node.`,
+          message: `Yes/No condition "${node.label || node.id}" must be a direct child of the trigger node or an action node.`,
         };
       }
     }
@@ -213,45 +210,134 @@ export function validateFlowGraph(
     }
   }
 
+  // ── R-11: Fan-out constraint — max 10 outgoing edges per node ──────
+  for (const node of nodes) {
+    const out = outEdges.get(node.id) ?? [];
+    if (out.length > 10) {
+      return {
+        valid: false,
+        rule: 'R-11',
+        message: `Node "${node.label || node.id}" has ${out.length} outgoing edges, exceeding the maximum of 10.`,
+      };
+    }
+  }
+
+  // ── Semantic validation: R-12 through R-19 (node config completeness) ──
+
+  for (const node of nodes) {
+    const config = node.config ?? {};
+    const label = node.label || node.id;
+
+    // ── R-12: Email action must have at least one recipient ────────
+    if (node.type === 'action' && node.subType === 'send_email') {
+      const recipients = config.recipients as unknown[] | undefined;
+      if (!recipients || !Array.isArray(recipients) || recipients.length === 0) {
+        return { valid: false, rule: 'R-12', message: `Email action "${label}" has no recipients configured` };
+      }
+    }
+
+    // ── R-13: Email action must have a subject ─────────────────────
+    if (node.type === 'action' && node.subType === 'send_email') {
+      const subject = config.subject as string | undefined;
+      if (!subject || (subject as string).trim() === '') {
+        return { valid: false, rule: 'R-13', message: `Email action "${label}" has no subject` };
+      }
+    }
+
+    // ── R-14: SMS action must have a body ──────────────────────────
+    if (node.type === 'action' && node.subType === 'send_sms') {
+      const body = config.body as string | undefined;
+      if (!body || (body as string).trim() === '') {
+        return { valid: false, rule: 'R-14', message: `SMS action "${label}" has no message body` };
+      }
+    }
+
+    // ── R-15: SMS custom recipient must have a phone number ────────
+    if (node.type === 'action' && node.subType === 'send_sms') {
+      const recipient = config.recipient as { type?: string; phone?: string } | undefined;
+      if (recipient?.type === 'custom' && (!recipient.phone || recipient.phone.trim() === '')) {
+        return { valid: false, rule: 'R-15', message: `SMS action "${label}" has custom recipient with no phone number` };
+      }
+    }
+
+    // ── R-16: Webhook action must have a valid URL ─────────────────
+    if (node.type === 'action' && node.subType === 'outgoing_webhook') {
+      const url = config.url as string | undefined;
+      if (!url || (url as string).trim() === '' || (!(url as string).startsWith('http://') && !(url as string).startsWith('https://'))) {
+        return { valid: false, rule: 'R-16', message: `Webhook action "${label}" has no URL or invalid URL` };
+      }
+    }
+
+    // ── R-17: Item trigger must have at least one item ─────────────
+    if (node.type === 'trigger' && (node.subType === 'item_ordered' || node.subType === 'item_ordered_x_times')) {
+      const items = config.items as unknown[] | undefined;
+      if (!items || !Array.isArray(items) || items.length === 0) {
+        return { valid: false, rule: 'R-17', message: `Item trigger "${label}" has no menu items configured` };
+      }
+    }
+
+    // ── R-18: Timer delay must have a duration ─────────────────────
+    if (node.type === 'timer' && node.subType === 'delay') {
+      const duration = config.duration as number | undefined;
+      if (!duration || typeof duration !== 'number' || duration <= 0) {
+        return { valid: false, rule: 'R-18', message: `Timer "${label}" has no delay duration set` };
+      }
+    }
+
+    // ── R-19: Timer date_field must have a target date ─────────────
+    if (node.type === 'timer' && node.subType === 'date_field') {
+      const targetDateUtc = config.targetDateUtc as string | undefined;
+      if (!targetDateUtc || (targetDateUtc as string).trim() === '') {
+        return { valid: false, rule: 'R-19', message: `Timer "${label}" has no target date set` };
+      }
+    }
+  }
+
   return { valid: true };
 }
 
 /**
- * Validate a branch from a yes_no condition: must be timer→action or directly action.
+ * Validate a branch from a yes_no condition using DFS.
+ * Every leaf node (no outgoing edges) must be an action node.
+ * Branches may pass through timers, other actions, or other conditions first.
  */
 function validateConditionBranch(
-  node: IFlowNode,
+  startNode: IFlowNode,
   nodeById: Map<string, IFlowNode>,
   outEdges: Map<string, IFlowEdge[]>,
 ): ValidationResult {
-  if (node.type === 'action') {
-    return { valid: true };
-  }
-  if (node.type === 'timer') {
-    // Timer must lead to exactly one action node
+  // DFS: follow all paths from startNode. Every leaf (node with no outgoing edges) must be an action.
+  const visited = new Set<string>();
+
+  function dfs(node: IFlowNode): ValidationResult {
+    if (visited.has(node.id)) return { valid: true }; // cycles caught by R-5
+    visited.add(node.id);
+
     const out = outEdges.get(node.id) ?? [];
-    if (out.length !== 1) {
-      return {
-        valid: false,
-        rule: 'R-6',
-        message: `Timer "${node.label || node.id}" in condition branch must have exactly one outgoing edge.`,
-      };
+
+    if (out.length === 0) {
+      // Leaf node — must be an action
+      if (node.type !== 'action') {
+        return {
+          valid: false,
+          rule: 'R-6',
+          message: `Condition branch must eventually terminate in an action node, but found terminal ${node.type} node "${node.label || node.id}".`,
+        };
+      }
+      return { valid: true };
     }
-    const next = nodeById.get(out[0]!.targetNodeId);
-    if (!next || next.type !== 'action') {
-      return {
-        valid: false,
-        rule: 'R-6',
-        message: `Condition branch timer "${node.label || node.id}" must be followed by an action node.`,
-      };
+
+    // Non-leaf: follow all outgoing edges
+    for (const edge of out) {
+      const target = nodeById.get(edge.targetNodeId);
+      if (!target) continue;
+      const result = dfs(target);
+      if (!result.valid) return result;
     }
     return { valid: true };
   }
-  return {
-    valid: false,
-    rule: 'R-6',
-    message: `Condition branch must terminate in an action node (optionally preceded by a timer), but found type "${node.type}".`,
-  };
+
+  return dfs(startNode);
 }
 
 /**

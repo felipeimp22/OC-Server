@@ -821,7 +821,7 @@ This tests sync-contacts, seed, flow creation/activation, Kafka event publishing
 
 ## 10. Trigger System Testing
 
-This section covers testing the three trigger types overhauled in the CRM trigger system: **order_completed** (fulfillment statuses), **order_status_changed** (targetStatus filter), and **new_order** (payment.succeeded). Each subsection includes copy-paste kcat commands, expected server logs, and MongoDB verification queries.
+This section covers testing triggers, execution features, and item-based triggers in the CRM engine. Subsections 10.1–10.7 cover the original trigger types: **order_completed** (fulfillment statuses), **order_status_changed** (targetStatuses multi-select filter), **new_order** (payment.succeeded), template variables, and abandoned cart. Subsection 10.8 covers **action chaining and fan-out** (v3). Subsection 10.9 covers **item_ordered** and **item_ordered_x_times** triggers (v3). Subsection 10.10 covers **multi-select status filtering** (targetStatuses array for item triggers). Subsection 10.11 covers the **runOnce toggle** for order_status_changed. Subsection 10.12 covers **payment status enforcement** (universal guard). Subsection 10.13 covers **item_ordered email delivery** (customer and custom recipients). Subsection 10.14 covers **action failure logging** (error recording). Subsection 10.15 covers **item_ordered_x_times counting from activation** (sinceDate, pre-activation exclusion). Subsection 10.16 covers **flow validation R-12 through R-19** (complete semantic rule tests). Each subsection includes copy-paste commands, expected server logs, and MongoDB verification queries.
 
 **Prerequisites**: Kafka running (`ENABLE_KAFKA=true`), an existing restaurant ID, and at least one customer ID in the database. Replace `YOUR_RESTAURANT_ID` and `YOUR_CUSTOMER_ID` with real ObjectId strings throughout.
 
@@ -955,11 +955,11 @@ db.crm_processed_events.findOne({ eventId: "order_completed_process:order-test-0
 
 ---
 
-### 10.3 Order Status Changed — targetStatus Filter
+### 10.3 Order Status Changed — targetStatuses Filter (Multi-Select)
 
-The `order_status_changed` trigger supports a `config.targetStatus` filter. If set, the trigger fires only when the new status matches. If empty or unset, it fires on every status change.
+The `order_status_changed` trigger supports `config.targetStatuses: string[]` (array). If set with one or more statuses, the trigger fires only when the new status is in the array. If empty or unset, it fires on every status change. Legacy `config.targetStatus` (single string) is auto-converted to `[targetStatus]` for backward compatibility.
 
-#### Setup: Create a flow with targetStatus = 'confirmed'
+#### Setup: Create a flow with targetStatuses = ['confirmed', 'ready']
 
 ```bash
 curl -s -X POST http://localhost:3001/api/v1/flows \
@@ -967,12 +967,12 @@ curl -s -X POST http://localhost:3001/api/v1/flows \
   -H "X-Restaurant-Id: YOUR_RESTAURANT_ID" \
   -H "Content-Type: application/json" \
   -d '{
-    "name": "Test Status Changed — Confirmed Only",
+    "name": "Test Status Changed — Confirmed or Ready",
     "nodes": [
       { "id": "t1", "type": "trigger", "subType": "order_status_changed", "label": "Status Changed",
-        "config": { "targetStatus": "confirmed" }, "position": {"x":0,"y":0} },
-      { "id": "a1", "type": "action", "subType": "send_email", "label": "Confirmed Email",
-        "config": { "recipients": [{"type":"customer"}], "subject": "Order Confirmed!", "body": "Your order has been confirmed." },
+        "config": { "targetStatuses": ["confirmed", "ready"] }, "position": {"x":0,"y":0} },
+      { "id": "a1", "type": "action", "subType": "send_email", "label": "Status Email",
+        "config": { "recipients": [{"type":"customer"}], "subject": "Order Update!", "body": "Your order status has changed." },
         "position": {"x":0,"y":150} }
     ],
     "edges": [{ "id": "e1", "sourceNodeId": "t1", "targetNodeId": "a1" }]
@@ -987,12 +987,12 @@ curl -s -X POST http://localhost:3001/api/v1/flows/FLOW_ID/activate \
 #### Test A: Non-matching status — trigger does NOT fire
 
 ```bash
-echo '{"eventType":"order.status_changed","restaurantId":"YOUR_RESTAURANT_ID","payload":{"orderId":"order-test-003","orderNumber":"ORD-003","customerId":"YOUR_CUSTOMER_ID","customerEmail":"test@example.com","customerName":"Test User","customerPhone":"+15551234567","orderType":"delivery","orderTotal":30.00,"paymentStatus":"paid","status":"preparing","previousStatus":"pending"}}' | kcat -b localhost:9092 -t orderchop.orders -P
+echo '{"eventType":"order.status_changed","restaurantId":"YOUR_RESTAURANT_ID","payload":{"orderId":"order-test-003","orderNumber":"ORD-003","customerId":"YOUR_CUSTOMER_ID","customerEmail":"test@example.com","customerName":"Test User","customerPhone":"+15551234567","orderType":"delivery","orderTotal":30.00,"paymentStatus":"paid","newStatus":"preparing","previousStatus":"pending","status":"preparing"}}' | kcat -b localhost:9092 -t orderchop.orders -P
 ```
 
 **Expected server logs:**
 ```
-[TriggerService] targetStatus mismatch {"configuredStatus":"confirmed","actualStatus":"preparing","reason":"targetStatus mismatch"}
+[TriggerService] targetStatuses mismatch {"configuredStatuses":["confirmed","ready"],"actualStatus":"preparing","reason":"targetStatuses mismatch"}
 ```
 
 **Verify — no execution created:**
@@ -1007,7 +1007,7 @@ db.crm_flow_executions.find({
 #### Test B: Matching status — trigger fires
 
 ```bash
-echo '{"eventType":"order.status_changed","restaurantId":"YOUR_RESTAURANT_ID","payload":{"orderId":"order-test-004","orderNumber":"ORD-004","customerId":"YOUR_CUSTOMER_ID","customerEmail":"test@example.com","customerName":"Test User","customerPhone":"+15551234567","orderType":"delivery","orderTotal":30.00,"paymentStatus":"paid","status":"confirmed","previousStatus":"pending"}}' | kcat -b localhost:9092 -t orderchop.orders -P
+echo '{"eventType":"order.status_changed","restaurantId":"YOUR_RESTAURANT_ID","payload":{"orderId":"order-test-004","orderNumber":"ORD-004","customerId":"YOUR_CUSTOMER_ID","customerEmail":"test@example.com","customerName":"Test User","customerPhone":"+15551234567","orderType":"delivery","orderTotal":30.00,"paymentStatus":"paid","newStatus":"confirmed","previousStatus":"pending","status":"confirmed"}}' | kcat -b localhost:9092 -t orderchop.orders -P
 ```
 
 **Expected:** Flow fires, contact enrolled.
@@ -1021,9 +1021,13 @@ db.crm_flow_executions.find({
 // Expected: 1
 ```
 
-#### Test C: Empty targetStatus — fires on every status change
+#### Test C: Empty targetStatuses — fires on every status change
 
-Create a second flow with `"config": {}` (no targetStatus), activate it, then send any status change — it should fire for every status.
+Create a second flow with `"config": {}` (no targetStatuses), activate it, then send any status change — it should fire for every status.
+
+#### Test D: Legacy targetStatus (single string) — backward compatibility
+
+Create a flow with the old format: `"config": { "targetStatus": "confirmed" }`. The backend auto-converts this to `targetStatuses: ["confirmed"]`. Send a status change to `confirmed` — trigger should fire. Send a status change to `preparing` — trigger should NOT fire.
 
 ---
 
@@ -1393,7 +1397,7 @@ Then restart with `ENABLE_SCHEDULERS=true` and watch for:
 
 ### Graph Validation Examples
 
-Test the 9 validation rules via the REST API:
+Test the structural validation rules (R-1 through R-11) via the REST API. For semantic rules (R-12 through R-19), see section 10.7b and 10.16.
 
 **R-1: Exactly one trigger node required**
 ```bash
@@ -1404,17 +1408,732 @@ curl -X PUT http://localhost:3001/api/v1/flows/FLOW_ID \
 # → 422 { "error": "INVALID_GRAPH", "rule": "R-1", "message": "Exactly one trigger node required..." }
 ```
 
-**R-4: Action nodes must be terminal (no outgoing edges)**
+**R-4: Action nodes MAY have outgoing edges (action chaining and fan-out)**
 ```bash
+# This is now VALID in v3 — action→action chaining is supported
 curl -X PUT http://localhost:3001/api/v1/flows/FLOW_ID \
   -H "Authorization: Bearer TOKEN" -H "X-Restaurant-Id: REST_ID" \
   -H "Content-Type: application/json" \
   -d '{"nodes":[{"id":"t1","type":"trigger","subType":"order_completed"},{"id":"a1","type":"action","subType":"send_email"},{"id":"a2","type":"action","subType":"send_sms"}],"edges":[{"id":"e1","sourceNodeId":"t1","targetNodeId":"a1"},{"id":"e2","sourceNodeId":"a1","targetNodeId":"a2"}]}'
-# → 422 { "error": "INVALID_GRAPH", "rule": "R-4" }
+# → 200 OK (action chaining is valid in v3)
 ```
 
 **R-5: No cycles allowed**
 A flow where node A → node B → node A would return 422 R-5.
+
+**R-11: Fan-out constraint — max 10 outgoing edges per node**
+```bash
+# A node with 11+ outgoing edges is rejected
+curl -X PUT http://localhost:3001/api/v1/flows/FLOW_ID \
+  -H "Authorization: Bearer TOKEN" -H "X-Restaurant-Id: REST_ID" \
+  -H "Content-Type: application/json" \
+  -d '{"nodes":[{"id":"t1","type":"trigger","subType":"order_completed"},{"id":"a1","type":"action","subType":"send_email"},{"id":"a2","type":"action","subType":"send_email"},{"id":"a3","type":"action","subType":"send_email"},{"id":"a4","type":"action","subType":"send_email"},{"id":"a5","type":"action","subType":"send_email"},{"id":"a6","type":"action","subType":"send_email"},{"id":"a7","type":"action","subType":"send_email"},{"id":"a8","type":"action","subType":"send_email"},{"id":"a9","type":"action","subType":"send_email"},{"id":"a10","type":"action","subType":"send_email"},{"id":"a11","type":"action","subType":"send_email"}],"edges":[{"id":"e1","sourceNodeId":"t1","targetNodeId":"a1"},{"id":"e2","sourceNodeId":"t1","targetNodeId":"a2"},{"id":"e3","sourceNodeId":"t1","targetNodeId":"a3"},{"id":"e4","sourceNodeId":"t1","targetNodeId":"a4"},{"id":"e5","sourceNodeId":"t1","targetNodeId":"a5"},{"id":"e6","sourceNodeId":"t1","targetNodeId":"a6"},{"id":"e7","sourceNodeId":"t1","targetNodeId":"a7"},{"id":"e8","sourceNodeId":"t1","targetNodeId":"a8"},{"id":"e9","sourceNodeId":"t1","targetNodeId":"a9"},{"id":"e10","sourceNodeId":"t1","targetNodeId":"a10"},{"id":"e11","sourceNodeId":"t1","targetNodeId":"a11"}]}'
+# → 422 { "error": "INVALID_GRAPH", "rule": "R-11", "message": "Node t1 has 11 outgoing edges (max 10)" }
+```
+
+### 10.7b Semantic Validation Rules (R-12 through R-19)
+
+Test that flows with incomplete node configuration are rejected at save time.
+
+#### R-12: Email action missing recipients
+```bash
+curl -X POST http://localhost:3001/api/v1/flows \
+  -H "Authorization: Bearer TOKEN" -H "X-Restaurant-Id: REST_ID" \
+  -H "Content-Type: application/json" \
+  -d '{"name":"Test R-12","nodes":[{"id":"t1","type":"trigger","subType":"order_completed","label":"Trigger","config":{},"position":{"x":100,"y":100}},{"id":"a1","type":"action","subType":"send_email","label":"Email","config":{"subject":"Hello","body":"World","recipients":[]},"position":{"x":100,"y":300}}],"edges":[{"id":"e1","sourceNodeId":"t1","targetNodeId":"a1"}]}'
+# → 422 { "error": "INVALID_GRAPH", "rule": "R-12", "message": "Email action \"Email\" has no recipients configured" }
+```
+
+#### R-16: Webhook action with invalid URL
+```bash
+curl -X POST http://localhost:3001/api/v1/flows \
+  -H "Authorization: Bearer TOKEN" -H "X-Restaurant-Id: REST_ID" \
+  -H "Content-Type: application/json" \
+  -d '{"name":"Test R-16","nodes":[{"id":"t1","type":"trigger","subType":"order_completed","label":"Trigger","config":{},"position":{"x":100,"y":100}},{"id":"a1","type":"action","subType":"outgoing_webhook","label":"Webhook","config":{"url":"not-a-url","body":"{}"},"position":{"x":100,"y":300}}],"edges":[{"id":"e1","sourceNodeId":"t1","targetNodeId":"a1"}]}'
+# → 422 { "error": "INVALID_GRAPH", "rule": "R-16", "message": "Webhook action \"Webhook\" has no URL or invalid URL" }
+```
+
+### 10.8 Action Chaining and Fan-Out
+
+Test scenarios for v3 action chaining and parallel fan-out execution.
+
+#### Action Chaining (email → sms)
+
+**Step 1: Create a flow with chained actions**
+```bash
+curl -X POST http://localhost:3001/api/v1/flows \
+  -H "Authorization: Bearer TOKEN" -H "X-Restaurant-Id: REST_ID" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "Action Chain Test",
+    "description": "Test email → sms chain",
+    "nodes": [
+      {"id":"t1","type":"trigger","subType":"order_completed","label":"Order Completed","config":{},"position":{"x":100,"y":100}},
+      {"id":"a1","type":"action","subType":"send_email","label":"Thank You Email","config":{"recipients":[{"type":"customer"}],"subject":"Thanks {{customer.first_name}}!","body":"Your order #{{order.number}} is complete."},"position":{"x":100,"y":250}},
+      {"id":"a2","type":"action","subType":"send_sms","label":"Follow-up SMS","config":{"recipient":{"type":"customer"},"body":"Thanks for ordering! -{{restaurant.name}}"},"position":{"x":100,"y":400}}
+    ],
+    "edges": [
+      {"id":"e1","sourceNodeId":"t1","targetNodeId":"a1"},
+      {"id":"e2","sourceNodeId":"a1","targetNodeId":"a2"}
+    ]
+  }'
+```
+
+**Step 2: Activate the flow and trigger with an order.completed event**
+
+**Step 3: Verify both actions executed in sequence**
+```javascript
+// Check execution logs — should show email first, then sms
+db.crm_flow_execution_logs.find({ executionId: '<EXEC_ID>' }).sort({ executedAt: 1 })
+// Expected: [{ nodeType: 'trigger', ... }, { nodeType: 'action', action: 'send_email', ... }, { nodeType: 'action', action: 'send_sms', ... }]
+```
+
+**Step 4: Verify execution completed**
+```javascript
+db.crm_flow_executions.findOne({ _id: ObjectId('<EXEC_ID>') })
+// Expected: status='completed', completedNodes includes all 3 node IDs, pendingNodes=[]
+```
+
+#### Fan-Out (trigger → 3 parallel actions)
+
+**Step 1: Create a flow with fan-out**
+```bash
+curl -X POST http://localhost:3001/api/v1/flows \
+  -H "Authorization: Bearer TOKEN" -H "X-Restaurant-Id: REST_ID" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "Fan-Out Test",
+    "description": "Test trigger → 3 parallel actions",
+    "nodes": [
+      {"id":"t1","type":"trigger","subType":"order_completed","label":"Order Completed","config":{},"position":{"x":250,"y":100}},
+      {"id":"a1","type":"action","subType":"send_email","label":"Customer Email","config":{"recipients":[{"type":"customer"}],"subject":"Order complete","body":"Thanks!"},"position":{"x":100,"y":300}},
+      {"id":"a2","type":"action","subType":"send_email","label":"Restaurant Email","config":{"recipients":[{"type":"restaurant"}],"subject":"Order fulfilled","body":"Order complete."},"position":{"x":250,"y":300}},
+      {"id":"a3","type":"action","subType":"send_sms","label":"Customer SMS","config":{"recipient":{"type":"customer"},"body":"Your order is ready!"},"position":{"x":400,"y":300}}
+    ],
+    "edges": [
+      {"id":"e1","sourceNodeId":"t1","targetNodeId":"a1"},
+      {"id":"e2","sourceNodeId":"t1","targetNodeId":"a2"},
+      {"id":"e3","sourceNodeId":"t1","targetNodeId":"a3"}
+    ]
+  }'
+```
+
+**Step 2: Activate and trigger — all 3 actions should execute via parallel Kafka events**
+
+**Step 3: Verify parallel execution**
+```javascript
+// All 3 actions should appear in execution logs
+db.crm_flow_execution_logs.find({ executionId: '<EXEC_ID>', nodeType: 'action' }).count()
+// Expected: 3
+
+// Execution should be completed with all nodes done
+db.crm_flow_executions.findOne({ _id: ObjectId('<EXEC_ID>') })
+// Expected: status='completed', completedNodes.length=4 (trigger + 3 actions), pendingNodes=[], erroredNodes=[]
+```
+
+#### Error Isolation in Fan-Out
+
+If one parallel branch fails (e.g., invalid email config), sibling branches should still complete:
+
+```javascript
+// After triggering a fan-out where one action has bad config:
+db.crm_flow_executions.findOne({ _id: ObjectId('<EXEC_ID>') })
+// Expected: status='completed' (not 'error'), erroredNodes=['<failed_node_id>'], completedNodes includes the successful nodes
+```
+
+### 10.9 Item-Based Trigger Testing
+
+#### item_ordered — Item Match + Modifier Match
+
+**Step 1: Create a flow with item_ordered trigger**
+```bash
+curl -X POST http://localhost:3001/api/v1/flows \
+  -H "Authorization: Bearer TOKEN" -H "X-Restaurant-Id: REST_ID" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "Item Ordered Test",
+    "description": "Fires when customer orders a specific item",
+    "nodes": [
+      {"id":"t1","type":"trigger","subType":"item_ordered","label":"Item Ordered","config":{"items":[{"menuItemId":"MENU_ITEM_ID","menuItemName":"Margherita Pizza","modifiers":[]}],"matchMode":"any"},"position":{"x":100,"y":100}},
+      {"id":"a1","type":"action","subType":"send_email","label":"Item Promo Email","config":{"recipients":[{"type":"customer"}],"subject":"You ordered {{matched_item.name}}!","body":"We noticed you ordered {{matched_item.name}}. Here is a special offer!"},"position":{"x":100,"y":300}}
+    ],
+    "edges": [
+      {"id":"e1","sourceNodeId":"t1","targetNodeId":"a1"}
+    ]
+  }'
+```
+
+**Step 2: Activate the flow**
+
+**Step 3: Simulate an order.completed event for an order that contains the configured menu item**
+
+**Step 4: Verify trigger fired**
+```javascript
+// Flow execution should exist for this order
+db.crm_flow_executions.findOne({ flowId: ObjectId('<FLOW_ID>'), 'context.orderId': '<ORDER_ID>' })
+// Expected: status='completed'
+```
+
+**Step 5: Test with modifier matching**
+
+Create a flow where the trigger config includes modifiers:
+```json
+{
+  "items": [{
+    "menuItemId": "MENU_ITEM_ID",
+    "menuItemName": "Burger",
+    "modifiers": [{
+      "optionName": "Size",
+      "choiceNames": ["Large"]
+    }]
+  }],
+  "matchMode": "any"
+}
+```
+
+- An order with the Burger item + Size=Large → trigger fires ✅
+- An order with the Burger item + Size=Small → trigger does NOT fire ✗
+- An order with the Burger item + no Size option → trigger does NOT fire ✗ (modifiers specified means they must match)
+
+**Step 6: Test matchMode 'all'**
+
+Create a config with 2 items and `matchMode: 'all'`:
+- An order containing BOTH items → trigger fires ✅
+- An order containing only one item → trigger does NOT fire ✗
+
+#### item_ordered_x_times — Cumulative Count Threshold
+
+**Step 1: Create a flow with item_ordered_x_times trigger (once mode — default)**
+```bash
+curl -X POST http://localhost:3001/api/v1/flows \
+  -H "Authorization: Bearer TOKEN" -H "X-Restaurant-Id: REST_ID" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "Loyalty Item Test (Once)",
+    "description": "Fires once on 3rd order of a specific item",
+    "nodes": [
+      {"id":"t1","type":"trigger","subType":"item_ordered_x_times","label":"Item Ordered 3 Times","config":{"items":[{"menuItemId":"MENU_ITEM_ID","menuItemName":"Margherita Pizza","modifiers":[]}],"matchMode":"any","threshold":3},"position":{"x":100,"y":100}},
+      {"id":"a1","type":"action","subType":"send_email","label":"Loyalty Reward","config":{"recipients":[{"type":"customer"}],"subject":"Loyalty reward!","body":"You have ordered Margherita Pizza 3 times! Here is a discount."},"position":{"x":100,"y":300}}
+    ],
+    "edges": [
+      {"id":"e1","sourceNodeId":"t1","targetNodeId":"a1"}
+    ]
+  }'
+```
+
+**Step 2: Activate the flow** (sets `activatedAt` — counting starts from now)
+
+**Step 3: Simulate 3 completed orders for the same customer containing the configured menu item**
+
+**Step 4: Verify the trigger fires on the 3rd order (at-least threshold)**
+```javascript
+// Should have exactly 1 execution
+db.crm_flow_executions.find({ flowId: ObjectId('<FLOW_ID>'), 'context.customerId': '<CUSTOMER_ID>' }).count()
+// Expected: 1
+
+// Achievement record should exist
+db.crm_trigger_achievements.findOne({ flowId: ObjectId('<FLOW_ID>'), contactId: ObjectId('<CONTACT_ID>') })
+// Expected: { count: 3, threshold: 3, resetCount: 0 }
+```
+
+**Step 5: Verify the 4th order does NOT re-fire** (once mode — achievement exists)
+```javascript
+// After a 4th order with the same item:
+db.crm_flow_executions.find({ flowId: ObjectId('<FLOW_ID>'), 'context.customerId': '<CUSTOMER_ID>' }).count()
+// Expected: still 1 (not 2)
+```
+
+#### item_ordered_x_times — Reset Mode
+
+**Step 1: Create a flow with resetOnThreshold = true**
+```bash
+curl -X POST http://localhost:3001/api/v1/flows \
+  -H "Authorization: Bearer TOKEN" -H "X-Restaurant-Id: REST_ID" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "Loyalty Item Test (Reset)",
+    "description": "Fires every 3rd order of a specific item",
+    "nodes": [
+      {"id":"t1","type":"trigger","subType":"item_ordered_x_times","label":"Every 3rd Pizza","config":{"items":[{"menuItemId":"MENU_ITEM_ID","menuItemName":"Margherita Pizza","modifiers":[]}],"matchMode":"any","threshold":3,"resetOnThreshold":true},"position":{"x":100,"y":100}},
+      {"id":"a1","type":"action","subType":"send_email","label":"Repeat Reward","config":{"recipients":[{"type":"customer"}],"subject":"Another reward!","body":"You have ordered Margherita Pizza again! Here is a discount."},"position":{"x":100,"y":300}}
+    ],
+    "edges": [
+      {"id":"e1","sourceNodeId":"t1","targetNodeId":"a1"}
+    ]
+  }'
+```
+
+**Step 2: Activate the flow**
+
+**Step 3: Simulate 3 orders → trigger fires**
+
+**Step 4: Simulate 3 more orders → trigger fires again (counter reset)**
+```javascript
+// After 6 total orders:
+db.crm_flow_executions.find({ flowId: ObjectId('<FLOW_ID>'), 'context.customerId': '<CUSTOMER_ID>' }).count()
+// Expected: 2 (fired at 3rd and 6th)
+
+// Achievement record should show resetCount
+db.crm_trigger_achievements.find({ flowId: ObjectId('<FLOW_ID>'), contactId: ObjectId('<CONTACT_ID>') })
+// Expected: 2 records — first with resetCount: 1, second with resetCount: 0
+```
+
+**Step 5: Verify counting query uses sinceDate**
+```javascript
+// The aggregation counts from flow.activatedAt (or last achievement for reset mode)
+db.orders.aggregate([
+  { $match: { restaurantId: ObjectId('REST_ID'), customerId: ObjectId('CUSTOMER_ID'), paymentStatus: 'paid', createdAt: { $gte: ISODate('ACTIVATED_AT') } } },
+  { $unwind: '$items' },
+  { $match: { 'items.menuItemId': ObjectId('MENU_ITEM_ID') } },
+  { $count: 'total' }
+])
+```
+
+### 10.10 Item Ordered with targetStatuses — Multi-Select Status Filtering
+
+The `item_ordered` and `item_ordered_x_times` triggers support an optional `config.targetStatuses: string[]` array that restricts which order statuses the trigger fires on.
+
+#### Setup: Create a flow with item_ordered + targetStatuses = ['delivered', 'completed']
+
+```bash
+curl -X POST http://localhost:3001/api/v1/flows \
+  -H "Authorization: Bearer TOKEN" -H "X-Restaurant-Id: REST_ID" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "Item Ordered — Delivered/Completed Only",
+    "nodes": [
+      {"id":"t1","type":"trigger","subType":"item_ordered","label":"Item Ordered","config":{"items":[{"menuItemId":"MENU_ITEM_ID","menuItemName":"Margherita Pizza","modifiers":[]}],"matchMode":"any","targetStatuses":["delivered","completed"]},"position":{"x":100,"y":100}},
+      {"id":"a1","type":"action","subType":"send_email","label":"Item Promo","config":{"recipients":[{"type":"customer"}],"subject":"Thanks for the pizza!","body":"Enjoy your {{matched_item.name}}."},"position":{"x":100,"y":300}}
+    ],
+    "edges": [{"id":"e1","sourceNodeId":"t1","targetNodeId":"a1"}]
+  }'
+
+# Activate the flow
+curl -s -X POST http://localhost:3001/api/v1/flows/FLOW_ID/activate \
+  -H "Authorization: Bearer TOKEN" -H "X-Restaurant-Id: REST_ID"
+```
+
+#### Test A: Order status = 'ready' — trigger does NOT fire (not in targetStatuses)
+
+Send an order.status_changed event with status `ready` for an order containing the configured menu item.
+
+**Expected server logs:**
+```
+[TriggerService] targetStatuses mismatch {"configuredStatuses":["delivered","completed"],"actualStatus":"ready","reason":"targetStatuses mismatch"}
+```
+
+**Verify — no execution:**
+```javascript
+db.crm_flow_executions.find({ flowId: ObjectId('FLOW_ID'), 'context.orderId': 'ORDER_ID' }).count()
+// Expected: 0
+```
+
+#### Test B: Order status = 'delivered' — trigger SHOULD fire
+
+Send an order.status_changed event with status `delivered` for the same order.
+
+**Expected:** Flow fires because `delivered` is in `targetStatuses`. The order is fetched from DB to verify items match, then the contact is enrolled.
+
+**Verify — execution created:**
+```javascript
+db.crm_flow_executions.find({ flowId: ObjectId('FLOW_ID'), 'context.orderId': 'ORDER_ID' }).count()
+// Expected: 1
+```
+
+#### Test C: Order status = 'completed' — trigger does NOT fire again (dedup)
+
+Send an order.status_changed event with status `completed` for the same order.
+
+**Expected:** Even though `completed` is in `targetStatuses`, `hasOrderBeenProcessedForFlow` blocks re-enrollment because the order was already enrolled in Test B.
+
+**Verify — still exactly one execution:**
+```javascript
+db.crm_flow_executions.find({ flowId: ObjectId('FLOW_ID'), 'context.orderId': 'ORDER_ID' }).count()
+// Expected: 1 (no duplicate)
+```
+
+#### Test D: Item Ordered with no targetStatuses — fires on first qualifying status
+
+Create a flow with `"config": { "items": [...], "matchMode": "any" }` (no `targetStatuses`). The trigger fires on the first qualifying fulfillment status (ready, out_for_delivery, delivered, completed) via `processOrderAsCompleted`.
+
+---
+
+### 10.11 Order Status Changed — runOnce Toggle
+
+The `order_status_changed` trigger supports `config.runOnce: boolean`. When true, the flow fires only the first time an order matches a selected status — subsequent matching status changes for the same order are blocked via `hasOrderBeenProcessedForFlow`.
+
+#### Setup: Create two flows — one with runOnce=true, one with runOnce=false
+
+```bash
+# Flow A: runOnce=true — fires only once per order
+curl -X POST http://localhost:3001/api/v1/flows \
+  -H "Authorization: Bearer TOKEN" -H "X-Restaurant-Id: REST_ID" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "Status Changed — RunOnce ON",
+    "nodes": [
+      {"id":"t1","type":"trigger","subType":"order_status_changed","label":"Status Changed","config":{"targetStatuses":["confirmed","ready"],"runOnce":true},"position":{"x":100,"y":100}},
+      {"id":"a1","type":"action","subType":"send_email","label":"Status Email","config":{"recipients":[{"type":"customer"}],"subject":"Order update!","body":"Your order status changed."},"position":{"x":100,"y":300}}
+    ],
+    "edges": [{"id":"e1","sourceNodeId":"t1","targetNodeId":"a1"}]
+  }'
+
+# Flow B: runOnce=false (or omitted) — fires on every matching status change
+curl -X POST http://localhost:3001/api/v1/flows \
+  -H "Authorization: Bearer TOKEN" -H "X-Restaurant-Id: REST_ID" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "Status Changed — RunOnce OFF",
+    "nodes": [
+      {"id":"t1","type":"trigger","subType":"order_status_changed","label":"Status Changed","config":{"targetStatuses":["confirmed","ready"],"runOnce":false},"position":{"x":100,"y":100}},
+      {"id":"a1","type":"action","subType":"send_email","label":"Status Email","config":{"recipients":[{"type":"customer"}],"subject":"Order update!","body":"Your order status changed."},"position":{"x":100,"y":300}}
+    ],
+    "edges": [{"id":"e1","sourceNodeId":"t1","targetNodeId":"a1"}]
+  }'
+
+# Activate both flows
+```
+
+#### Test A: runOnce=true — fires on 'confirmed', does NOT fire again on 'ready'
+
+```bash
+# Status change to 'confirmed'
+echo '{"eventType":"order.status_changed","restaurantId":"REST_ID","payload":{"orderId":"order-runonce-001","orderNumber":"ORD-RO1","customerId":"CUST_ID","customerEmail":"test@example.com","customerName":"Test User","customerPhone":"+15551234567","orderType":"delivery","orderTotal":30.00,"paymentStatus":"paid","newStatus":"confirmed","previousStatus":"pending","status":"confirmed"}}' | kcat -b localhost:9092 -t orderchop.orders -P
+```
+
+**Expected:** Flow A fires — contact enrolled.
+
+```bash
+# Same order, status change to 'ready'
+echo '{"eventType":"order.status_changed","restaurantId":"REST_ID","payload":{"orderId":"order-runonce-001","orderNumber":"ORD-RO1","customerId":"CUST_ID","customerEmail":"test@example.com","customerName":"Test User","customerPhone":"+15551234567","orderType":"delivery","orderTotal":30.00,"paymentStatus":"paid","newStatus":"ready","previousStatus":"confirmed","status":"ready"}}' | kcat -b localhost:9092 -t orderchop.orders -P
+```
+
+**Expected server logs:**
+```
+[TriggerService] order_status_changed runOnce: order already processed {"flowId":"FLOW_A_ID","orderId":"order-runonce-001"}
+```
+
+**Verify — Flow A has exactly 1 execution for this order:**
+```javascript
+db.crm_flow_executions.find({ flowId: ObjectId('FLOW_A_ID'), 'context.orderId': 'order-runonce-001' }).count()
+// Expected: 1
+```
+
+#### Test B: runOnce=false — fires on 'confirmed', fires AGAIN on 'ready'
+
+Use a different orderId for Flow B testing. Send two status changes (confirmed, then ready).
+
+**Verify — Flow B has 2 executions (one per matching status change):**
+```javascript
+db.crm_flow_executions.find({ flowId: ObjectId('FLOW_B_ID'), 'context.orderId': 'order-runonce-002' }).count()
+// Expected: 2 (fires on each matching status change, assuming previous execution completed before the next)
+```
+
+**Note:** The `isContactEnrolled` anti-spam check may block the second enrollment if the first execution is still actively running. Wait for the first execution to complete before sending the second status change.
+
+---
+
+### 10.12 Payment Status Enforcement — Universal Guard
+
+All order-related triggers require `paymentStatus` to be `'paid'` or `'succeeded'` in the event payload. This is a universal guard at the top of `TriggerService.checkTriggerConditions()`.
+
+#### Test A: Unpaid order — no order-related triggers fire
+
+```bash
+# Order completed event with paymentStatus='pending' (NOT paid)
+echo '{"eventType":"order.status_changed","restaurantId":"YOUR_RESTAURANT_ID","payload":{"orderId":"order-unpaid-001","orderNumber":"ORD-UNPAID","customerId":"YOUR_CUSTOMER_ID","customerEmail":"test@example.com","customerName":"Test User","customerPhone":"+15551234567","orderType":"delivery","orderTotal":30.00,"paymentStatus":"pending","newStatus":"confirmed","previousStatus":"pending","status":"confirmed"}}' | kcat -b localhost:9092 -t orderchop.orders -P
+```
+
+**Expected server logs:**
+```
+[TriggerService] Skipping trigger: payment not confirmed (paymentStatus=pending)
+```
+
+**Verify — no executions created for any order-related flow:**
+```javascript
+db.crm_flow_executions.find({
+  restaurantId: ObjectId("YOUR_RESTAURANT_ID"),
+  "context.orderId": "order-unpaid-001"
+}).count()
+// Expected: 0
+```
+
+#### Test B: Paid order — triggers fire normally
+
+```bash
+# Same order, now with paymentStatus='paid'
+echo '{"eventType":"order.status_changed","restaurantId":"YOUR_RESTAURANT_ID","payload":{"orderId":"order-paid-001","orderNumber":"ORD-PAID","customerId":"YOUR_CUSTOMER_ID","customerEmail":"test@example.com","customerName":"Test User","customerPhone":"+15551234567","orderType":"delivery","orderTotal":30.00,"paymentStatus":"paid","newStatus":"confirmed","previousStatus":"pending","status":"confirmed"}}' | kcat -b localhost:9092 -t orderchop.orders -P
+```
+
+**Expected:** The payment guard passes, and any matching active flows evaluate their trigger conditions normally.
+
+#### Test C: Stripe 'succeeded' status — accepted as paid
+
+```bash
+# Payment event with paymentStatus='succeeded' (Stripe format)
+echo '{"eventType":"payment.succeeded","restaurantId":"YOUR_RESTAURANT_ID","payload":{"orderId":"order-stripe-001","orderNumber":"ORD-STRIPE","customerId":"YOUR_CUSTOMER_ID","customerEmail":"test@example.com","customerName":"Test User","orderTotal":30.00,"paymentStatus":"succeeded","paymentMethod":"card"}}' | kcat -b localhost:9092 -t orderchop.payments -P
+```
+
+**Expected:** The payment guard accepts `'succeeded'` — any matching `new_order` flows evaluate normally.
+
+#### Test D: Abandoned cart — exempt from payment guard
+
+The `abandoned_cart` trigger is exempt from the payment guard (it inherently targets unpaid orders). See section 10.7 for abandoned cart testing — the `paymentStatus` field is not checked for this trigger type.
+
+#### Test E: no_order_in_x_days — exempt from payment guard
+
+The `no_order_in_x_days` trigger is cron-based and has no order context in its payload. It is exempt from the payment guard. See the "Testing no_order_in_x_days Cron" troubleshooting section for testing instructions.
+
+---
+
+### 10.13 Item Ordered — Email Delivery Verification
+
+Verify that item_ordered trigger flows actually deliver emails for both customer and custom recipients.
+
+#### Setup: Create a flow with item_ordered trigger and email action
+
+```bash
+curl -X POST http://localhost:3001/api/v1/flows \
+  -H "Authorization: Bearer TOKEN" -H "X-Restaurant-Id: REST_ID" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "Item Ordered Email Test",
+    "nodes": [
+      {"id":"t1","type":"trigger","subType":"item_ordered","label":"Item Ordered","config":{"items":[{"menuItemId":"MENU_ITEM_ID","menuItemName":"Margherita Pizza","modifiers":[]}],"matchMode":"any"},"position":{"x":100,"y":100}},
+      {"id":"a1","type":"action","subType":"send_email","label":"Customer Email","config":{"recipients":[{"type":"customer"},{"type":"custom","email":"manager@restaurant.com"}],"subject":"You ordered {{matched_item.name}}!","body":"Hi {{customer.first_name}}, thanks for ordering {{matched_item.name}}."},"position":{"x":100,"y":300}}
+    ],
+    "edges": [{"id":"e1","sourceNodeId":"t1","targetNodeId":"a1"}]
+  }'
+
+# Activate the flow
+curl -s -X POST http://localhost:3001/api/v1/flows/FLOW_ID/activate \
+  -H "Authorization: Bearer TOKEN" -H "X-Restaurant-Id: REST_ID"
+```
+
+#### Test A: Customer recipient — email sent to contact.email
+
+Ensure the order in the DB contains the configured menu item, then send an order.completed event with `paymentStatus: 'paid'`.
+
+**Verify — communication log shows email sent to customer:**
+```javascript
+db.crm_communication_logs.find({
+  restaurantId: ObjectId('REST_ID'),
+  channel: 'email'
+}).sort({ createdAt: -1 }).limit(1).pretty()
+// Expected: status='sent', to includes the customer's email address
+// Subject should be interpolated: "You ordered Margherita Pizza!"
+```
+
+#### Test B: Custom recipient — email sent to literal address
+
+The custom recipient (`manager@restaurant.com`) should also receive the email.
+
+**Verify — communication log shows both recipients:**
+```javascript
+db.crm_communication_logs.find({
+  restaurantId: ObjectId('REST_ID'),
+  channel: 'email'
+}).sort({ createdAt: -1 }).limit(2).pretty()
+// Expected: at least one log with to containing 'manager@restaurant.com'
+```
+
+#### Test C: Customer email is null — warning logged, custom recipient still receives
+
+If the contact has no email, the customer recipient is skipped with a warning, but the custom recipient still gets the email.
+
+**Verify — execution log shows action completed (custom recipient received):**
+```javascript
+db.crm_flow_execution_logs.find({ executionId: '<EXEC_ID>', nodeType: 'action' }).pretty()
+// Expected: result='success' (at least one recipient resolved)
+```
+
+---
+
+### 10.14 Action Failure Logging
+
+Verify that action failures are properly recorded on the execution record.
+
+#### Test A: Email with no recipients — execution records error
+
+Create a flow where the email action has an empty recipients array (bypass R-12 by saving directly to DB or by removing recipients after saving):
+
+```javascript
+// Manually insert a flow with empty recipients (for testing only)
+db.crm_flows.updateOne(
+  { _id: ObjectId('FLOW_ID') },
+  { $set: { 'nodes.$[node].config.recipients': [] } },
+  { arrayFilters: [{ 'node.subType': 'send_email' }] }
+)
+```
+
+Trigger the flow via a Kafka event.
+
+**Verify — error recorded on execution:**
+```javascript
+db.crm_flow_executions.findOne({ flowId: ObjectId('FLOW_ID') })
+// Expected: erroredNodes includes the email action node ID
+// completedNodes should NOT include the email node
+
+db.crm_flow_execution_logs.findOne({
+  executionId: '<EXEC_ID>',
+  nodeType: 'action',
+  result: 'failure'
+})
+// Expected: error contains "No recipients resolved"
+```
+
+**Verify — flow still advances (not halted):**
+If the email action has downstream nodes, they should still execute. The flow completes with partial errors.
+
+#### Test B: Webhook with invalid URL — execution records error
+
+Create a flow with a webhook action where `config.url` is empty or doesn't start with `http`.
+
+**Verify — error recorded:**
+```javascript
+db.crm_flow_execution_logs.findOne({
+  executionId: '<EXEC_ID>',
+  nodeType: 'action',
+  result: 'failure'
+})
+// Expected: error contains "Webhook URL is empty" or "Webhook URL is invalid"
+```
+
+#### Test C: SMS with empty body — execution records error
+
+```javascript
+db.crm_flow_execution_logs.findOne({
+  executionId: '<EXEC_ID>',
+  nodeType: 'action',
+  result: 'failure'
+})
+// Expected: error contains "SMS body is empty"
+```
+
+---
+
+### 10.15 item_ordered_x_times — Counting from Flow Activation
+
+Verify that orders placed before `flow.activatedAt` are NOT counted toward the threshold.
+
+#### Setup
+
+1. Create several orders for a customer containing the target menu item (these are "pre-activation" orders)
+2. Create a flow with item_ordered_x_times trigger (threshold=3)
+3. Activate the flow — `activatedAt` is set to now
+
+#### Test A: Pre-activation orders not counted
+
+After activation, send 1 order with the target item.
+
+**Verify — no execution yet (count is 1, threshold is 3):**
+```javascript
+db.crm_flow_executions.find({ flowId: ObjectId('FLOW_ID') }).count()
+// Expected: 0 (only 1 post-activation order, threshold=3)
+```
+
+#### Test B: Post-activation orders reach threshold
+
+Send 2 more orders with the target item (total post-activation = 3).
+
+**Verify — trigger fires on the 3rd post-activation order:**
+```javascript
+db.crm_flow_executions.find({ flowId: ObjectId('FLOW_ID') }).count()
+// Expected: 1
+
+db.crm_trigger_achievements.findOne({ flowId: ObjectId('FLOW_ID') })
+// Expected: count >= 3, achievedAt after flow.activatedAt
+```
+
+#### Test C: Verify aggregation uses sinceDate
+
+Check the MongoDB aggregation directly:
+```javascript
+// This should only count orders after activatedAt
+db.orders.aggregate([
+  { $match: {
+    restaurantId: ObjectId('REST_ID'),
+    customerId: ObjectId('CUSTOMER_ID'),
+    paymentStatus: 'paid',
+    createdAt: { $gte: ISODate('FLOW_ACTIVATED_AT') }
+  }},
+  { $unwind: '$items' },
+  { $match: { 'items.menuItemId': ObjectId('MENU_ITEM_ID') } },
+  { $count: 'total' }
+])
+// Expected: total = 3 (only post-activation orders)
+```
+
+#### Test D: Legacy flow without activatedAt — falls back to all-time counting
+
+For flows activated before the `activatedAt` feature was added, counting falls back to all-time.
+
+**Expected server logs:**
+```
+[TriggerService] Flow missing activatedAt — using all-time counting for item_ordered_x_times
+```
+
+---
+
+### 10.16 Flow Validation R-12 through R-19 — Complete Test Matrix
+
+Comprehensive tests for all 8 semantic validation rules. These rules prevent saving flows with incomplete node configuration.
+
+#### R-13: Email action missing subject
+```bash
+curl -X POST http://localhost:3001/api/v1/flows \
+  -H "Authorization: Bearer TOKEN" -H "X-Restaurant-Id: REST_ID" \
+  -H "Content-Type: application/json" \
+  -d '{"name":"Test R-13","nodes":[{"id":"t1","type":"trigger","subType":"order_completed","label":"Trigger","config":{},"position":{"x":100,"y":100}},{"id":"a1","type":"action","subType":"send_email","label":"Email","config":{"subject":"","body":"Hello","recipients":[{"type":"customer"}]},"position":{"x":100,"y":300}}],"edges":[{"id":"e1","sourceNodeId":"t1","targetNodeId":"a1"}]}'
+# → 422 { "error": "INVALID_GRAPH", "rule": "R-13", "message": "Email action \"Email\" has no subject" }
+```
+
+#### R-14: SMS action missing body
+```bash
+curl -X POST http://localhost:3001/api/v1/flows \
+  -H "Authorization: Bearer TOKEN" -H "X-Restaurant-Id: REST_ID" \
+  -H "Content-Type: application/json" \
+  -d '{"name":"Test R-14","nodes":[{"id":"t1","type":"trigger","subType":"order_completed","label":"Trigger","config":{},"position":{"x":100,"y":100}},{"id":"a1","type":"action","subType":"send_sms","label":"SMS","config":{"recipient":{"type":"customer"},"body":""},"position":{"x":100,"y":300}}],"edges":[{"id":"e1","sourceNodeId":"t1","targetNodeId":"a1"}]}'
+# → 422 { "error": "INVALID_GRAPH", "rule": "R-14", "message": "SMS action \"SMS\" has no message body" }
+```
+
+#### R-15: SMS custom recipient missing phone
+```bash
+curl -X POST http://localhost:3001/api/v1/flows \
+  -H "Authorization: Bearer TOKEN" -H "X-Restaurant-Id: REST_ID" \
+  -H "Content-Type: application/json" \
+  -d '{"name":"Test R-15","nodes":[{"id":"t1","type":"trigger","subType":"order_completed","label":"Trigger","config":{},"position":{"x":100,"y":100}},{"id":"a1","type":"action","subType":"send_sms","label":"SMS","config":{"recipient":{"type":"custom","phone":""},"body":"Hello"},"position":{"x":100,"y":300}}],"edges":[{"id":"e1","sourceNodeId":"t1","targetNodeId":"a1"}]}'
+# → 422 { "error": "INVALID_GRAPH", "rule": "R-15", "message": "SMS action \"SMS\" has custom recipient with no phone number" }
+```
+
+#### R-17: Item trigger missing items
+```bash
+curl -X POST http://localhost:3001/api/v1/flows \
+  -H "Authorization: Bearer TOKEN" -H "X-Restaurant-Id: REST_ID" \
+  -H "Content-Type: application/json" \
+  -d '{"name":"Test R-17","nodes":[{"id":"t1","type":"trigger","subType":"item_ordered","label":"Item Trigger","config":{"items":[],"matchMode":"any"},"position":{"x":100,"y":100}},{"id":"a1","type":"action","subType":"send_email","label":"Email","config":{"recipients":[{"type":"customer"}],"subject":"Hello","body":"World"},"position":{"x":100,"y":300}}],"edges":[{"id":"e1","sourceNodeId":"t1","targetNodeId":"a1"}]}'
+# → 422 { "error": "INVALID_GRAPH", "rule": "R-17", "message": "Item trigger \"Item Trigger\" has no menu items configured" }
+```
+
+#### R-18: Timer delay missing duration
+```bash
+curl -X POST http://localhost:3001/api/v1/flows \
+  -H "Authorization: Bearer TOKEN" -H "X-Restaurant-Id: REST_ID" \
+  -H "Content-Type: application/json" \
+  -d '{"name":"Test R-18","nodes":[{"id":"t1","type":"trigger","subType":"order_completed","label":"Trigger","config":{},"position":{"x":100,"y":100}},{"id":"a1","type":"action","subType":"send_email","label":"Email","config":{"recipients":[{"type":"customer"}],"subject":"Hello","body":"World"},"position":{"x":100,"y":250}},{"id":"tm1","type":"timer","subType":"delay","label":"Wait","config":{},"position":{"x":100,"y":400}},{"id":"a2","type":"action","subType":"send_sms","label":"SMS","config":{"recipient":{"type":"customer"},"body":"Follow up"},"position":{"x":100,"y":550}}],"edges":[{"id":"e1","sourceNodeId":"t1","targetNodeId":"a1"},{"id":"e2","sourceNodeId":"a1","targetNodeId":"tm1"},{"id":"e3","sourceNodeId":"tm1","targetNodeId":"a2"}]}'
+# → 422 { "error": "INVALID_GRAPH", "rule": "R-18", "message": "Timer \"Wait\" has no delay duration set" }
+```
+
+#### R-19: Timer date_field missing target date
+```bash
+curl -X POST http://localhost:3001/api/v1/flows \
+  -H "Authorization: Bearer TOKEN" -H "X-Restaurant-Id: REST_ID" \
+  -H "Content-Type: application/json" \
+  -d '{"name":"Test R-19","nodes":[{"id":"t1","type":"trigger","subType":"order_completed","label":"Trigger","config":{},"position":{"x":100,"y":100}},{"id":"a1","type":"action","subType":"send_email","label":"Email","config":{"recipients":[{"type":"customer"}],"subject":"Hello","body":"World"},"position":{"x":100,"y":250}},{"id":"tm1","type":"timer","subType":"date_field","label":"Schedule","config":{},"position":{"x":100,"y":400}},{"id":"a2","type":"action","subType":"send_sms","label":"SMS","config":{"recipient":{"type":"customer"},"body":"Follow up"},"position":{"x":100,"y":550}}],"edges":[{"id":"e1","sourceNodeId":"t1","targetNodeId":"a1"},{"id":"e2","sourceNodeId":"a1","targetNodeId":"tm1"},{"id":"e3","sourceNodeId":"tm1","targetNodeId":"a2"}]}'
+# → 422 { "error": "INVALID_GRAPH", "rule": "R-19", "message": "Timer \"Schedule\" has no target date set" }
+```
+
+---
 
 ### Running Unit Tests
 
