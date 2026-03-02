@@ -13,6 +13,7 @@
 import { FlowService } from './FlowService.js';
 import { FlowExecutionRepository } from '../repositories/FlowExecutionRepository.js';
 import { FlowExecutionLogRepository } from '../repositories/FlowExecutionLogRepository.js';
+import { TriggerAchievementRepository } from '../repositories/TriggerAchievementRepository.js';
 import { FlowEngineService } from './FlowEngineService.js';
 import type { IFlowDocument, IFlowNode } from '../domain/models/crm/Flow.js';
 import type { IFlowExecutionDocument } from '../domain/models/crm/FlowExecution.js';
@@ -35,11 +36,13 @@ export class TriggerService {
   private readonly flowService: FlowService;
   private readonly executionRepo: FlowExecutionRepository;
   private readonly logRepo: FlowExecutionLogRepository;
+  private readonly achievementRepo: TriggerAchievementRepository;
 
   constructor() {
     this.flowService = new FlowService();
     this.executionRepo = new FlowExecutionRepository();
     this.logRepo = new FlowExecutionLogRepository();
+    this.achievementRepo = new TriggerAchievementRepository();
   }
 
   /**
@@ -99,7 +102,7 @@ export class TriggerService {
     }
 
     // Check trigger conditions (e.g., orderTypes filter)
-    if (!(await this.checkTriggerConditions(triggerNode, payload))) {
+    if (!(await this.checkTriggerConditions(triggerNode, payload, flow))) {
       log.info({ flowId, contactId, config: triggerNode.config, payloadStatus: payload.paymentStatus ?? payload.newStatus }, 'Trigger conditions not met');
       return { flowId, flowName: flow.name, enrolled: false, reason: 'Trigger conditions not met' };
     }
@@ -173,7 +176,7 @@ export class TriggerService {
   /**
    * Check if the event payload matches the trigger node's conditions.
    */
-  private async checkTriggerConditions(triggerNode: IFlowNode, payload: ICRMEventPayload): Promise<boolean> {
+  private async checkTriggerConditions(triggerNode: IFlowNode, payload: ICRMEventPayload, flow?: IFlowDocument): Promise<boolean> {
     const config = triggerNode.config;
 
     // Resolve effective payment status from multiple possible payload fields
@@ -289,13 +292,15 @@ export class TriggerService {
       }
     }
 
-    // item_ordered_x_times: cumulative counting — fire exactly at threshold.
-    // First checks current order contains matching items (same logic as item_ordered),
-    // then queries DB for lifetime count. Uses === for exact threshold match.
+    // item_ordered_x_times: cumulative counting with flow-relative date and two modes:
+    // - Once mode (default): fires exactly once when threshold is reached
+    // - Reset mode (config.resetOnThreshold = true): fires repeatedly, resetting count each time
+    // Counts orders from flow.activatedAt (or all-time for legacy flows without activatedAt).
     if (triggerNode.subType === 'item_ordered_x_times') {
       const configItems = config.items as Array<{ menuItemId: string; menuItemName: string; modifiers?: Array<{ optionName: string; choiceNames: string[] }> }> | undefined;
       const matchMode = (config.matchMode as string) ?? 'any';
       const threshold = config.threshold as number | undefined;
+      const resetOnThreshold = config.resetOnThreshold === true;
       const orderItems = payload.items as Array<{ menuItemId: string; name: string; options?: Array<{ name: string; choice: string }> }> | undefined;
 
       if (!configItems || configItems.length === 0 || !orderItems || orderItems.length === 0) {
@@ -333,8 +338,6 @@ export class TriggerService {
         return false;
       }
 
-      // Count lifetime orders containing each matching config item.
-      // The current order is already saved to DB by the time triggers evaluate.
       const restaurantId = payload.restaurantId as string | undefined;
       const customerId = payload.customerId as string | undefined;
       if (!restaurantId || !customerId) {
@@ -342,20 +345,56 @@ export class TriggerService {
         return false;
       }
 
+      // Determine sinceDate: flow.activatedAt or last achievement date (for reset mode)
+      let sinceDate: Date | undefined;
+      const flowId = flow?._id.toString();
+      const contactId = payload.customerId as string;
+
+      if (flow?.activatedAt) {
+        sinceDate = flow.activatedAt;
+      } else {
+        log.warn({ flowId }, 'Flow missing activatedAt — using all-time counting for item_ordered_x_times');
+      }
+
+      // Check for existing achievement
+      let lastAchievement = null;
+      if (flowId && contactId) {
+        lastAchievement = await this.achievementRepo.findLatest(
+          restaurantId,
+          flowId,
+          contactId,
+          triggerNode.id,
+        );
+      }
+
+      if (lastAchievement) {
+        if (resetOnThreshold) {
+          // Reset mode: count from last achievement date
+          sinceDate = lastAchievement.achievedAt;
+          log.info({ flowId, contactId, sinceDateReset: sinceDate }, 'item_ordered_x_times: reset mode — counting from last achievement');
+        } else {
+          // Once mode: already fired, skip
+          log.info({ flowId, contactId, achievedAt: lastAchievement.achievedAt }, 'item_ordered_x_times: once mode — already achieved, skipping');
+          return false;
+        }
+      }
+
+      // Count orders containing each matching config item since sinceDate
       const thresholdResults = await Promise.all(
         configItems.map(async (configItem, idx) => {
-          if (!currentOrderMatches[idx]) return false; // Skip items not in current order
+          if (!currentOrderMatches[idx]) return false;
           const count = await this.countItemOrdersByCustomer(
             restaurantId,
             customerId,
             configItem.menuItemId,
             configItem.modifiers,
+            sinceDate,
           );
           log.info(
-            { menuItemId: configItem.menuItemId, count, threshold },
-            'item_ordered_x_times: lifetime count for item',
+            { menuItemId: configItem.menuItemId, count, threshold, sinceDate },
+            'item_ordered_x_times: count for item',
           );
-          return count === threshold;
+          return count >= threshold;
         }),
       );
 
@@ -366,6 +405,32 @@ export class TriggerService {
       if (!passes) {
         log.info({ matchMode, thresholdResults, reason: 'item_ordered_x_times: threshold not met' }, 'item_ordered_x_times check failed');
         return false;
+      }
+
+      // Threshold met — create achievement record
+      if (flowId) {
+        try {
+          await this.achievementRepo.create({
+            restaurantId,
+            flowId,
+            contactId,
+            triggerNodeId: triggerNode.id,
+            triggerSubType: 'item_ordered_x_times',
+            achievedAt: new Date(),
+            count: threshold, // At least threshold
+            threshold,
+            metadata: { matchMode, configItems: configItems.map((i) => i.menuItemId) },
+          } as any);
+
+          // If reset mode and previous achievement exists, increment its resetCount
+          if (resetOnThreshold && lastAchievement) {
+            await this.achievementRepo.incrementResetCount(lastAchievement._id);
+          }
+
+          log.info({ flowId, contactId, threshold, resetOnThreshold }, 'item_ordered_x_times: achievement recorded');
+        } catch (err) {
+          log.warn({ err, flowId, contactId }, 'Failed to create trigger achievement — trigger will still fire');
+        }
       }
     }
 
@@ -409,15 +474,21 @@ export class TriggerService {
     customerId: string,
     menuItemId: string,
     modifiers?: Array<{ optionName: string; choiceNames: string[] }>,
+    sinceDate?: Date,
   ): Promise<number> {
+    const matchFilter: Record<string, unknown> = {
+      restaurantId: new mongoose.Types.ObjectId(restaurantId),
+      customerId: new mongoose.Types.ObjectId(customerId),
+      paymentStatus: 'paid',
+    };
+
+    // Filter to orders placed after sinceDate (flow activation or last achievement)
+    if (sinceDate) {
+      matchFilter.createdAt = { $gte: sinceDate };
+    }
+
     const pipeline: any[] = [
-      {
-        $match: {
-          restaurantId: new mongoose.Types.ObjectId(restaurantId),
-          customerId: new mongoose.Types.ObjectId(customerId),
-          paymentStatus: 'paid',
-        },
-      },
+      { $match: matchFilter },
       { $unwind: '$items' },
       {
         $match: {

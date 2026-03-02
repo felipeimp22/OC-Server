@@ -513,32 +513,48 @@ The `item_ordered` trigger uses the same `hasOrderBeenProcessedForFlow` dedup as
 
 ## item_ordered_x_times Trigger — Cumulative Counting
 
-The `item_ordered_x_times` trigger fires when a customer has ordered a specific menu item a cumulative number of times across their lifetime (paid orders only), hitting the threshold exactly on this order. It evaluates in `processOrderAsCompleted()` alongside `item_ordered`.
+The `item_ordered_x_times` trigger fires when a customer has ordered a specific menu item a cumulative number of times (paid orders only), reaching the configured threshold. It evaluates in `processOrderAsCompleted()` alongside `item_ordered`.
+
+### Two Counting Modes
+
+- **Once mode** (default, `config.resetOnThreshold = false/undefined`): Fires exactly once when threshold is reached. A `CrmTriggerAchievement` record is created; subsequent evaluations check for this record and skip immediately.
+- **Reset mode** (`config.resetOnThreshold = true`): Fires repeatedly. After reaching the threshold, counting resets from the achievement date. Example: threshold=5 fires on 5th, 10th, 15th order, etc.
+
+### Flow-Relative Counting
+
+Orders are counted from `flow.activatedAt` — only orders placed after the flow was activated count toward the threshold. This prevents pre-existing order history from immediately triggering newly activated flows.
+
+**Backward compatibility**: Legacy flows without `activatedAt` (activated before this feature) fall back to all-time counting with a warning log.
 
 ```
 processOrderAsCompleted()
   1. Fetch order items from DB (Order.findById) → payload.items[]
   2. evaluateTriggers('item_ordered_x_times', ..., { items, restaurantId, ... })
-  3. TriggerService.checkTriggerConditions():
-     a. Early return: check current order contains matching config items (same logic as item_ordered)
-     b. For each matching item: countItemOrdersByCustomer() → lifetime count
-     c. Fire only when count === threshold (exact equality)
+  3. TriggerService.checkTriggerConditions(triggerNode, payload, flow):
+     a. Early return: check current order contains matching config items
+     b. Determine sinceDate:
+        - Default: flow.activatedAt
+        - Reset mode + previous achievement: lastAchievement.achievedAt
+        - Once mode + previous achievement: return false (already fired)
+     c. For each matching item: countItemOrdersByCustomer(sinceDate) → count
+     d. Fire when count >= threshold (at-least match)
+     e. On match: create CrmTriggerAchievement record
 ```
 
 ### Counting Method: `countItemOrdersByCustomer()`
 
 MongoDB aggregation pipeline:
-1. `$match`: restaurantId + customerId + paymentStatus='paid'
+1. `$match`: restaurantId + customerId + paymentStatus='paid' + createdAt >= sinceDate (when provided)
 2. `$unwind`: '$items'
 3. `$match`: 'items.menuItemId' = target menuItemId (ObjectId)
 4. If modifiers specified: `$match` with `$elemMatch` on 'items.options' for each modifier (name + choice)
 5. `$count`: 'total'
 
-**Performance**: Leverages index on `(restaurantId, customerId, paymentStatus)`. Query runs once per matching config item per order completion per active `item_ordered_x_times` flow. Acceptable for MVP.
+**Performance**: Leverages index on `(restaurantId, customerId, paymentStatus)`. Adding `createdAt >= sinceDate` reduces scan range for established customers.
 
-### Exact Threshold (`===`)
+### At-Least Threshold (`>=`)
 
-The `=== threshold` check is critical: using `>=` would fire on every order after the threshold. The `===` ensures the trigger fires exactly once per customer per threshold value, without needing additional dedup beyond the existing `hasOrderBeenProcessedForFlow`.
+Uses `count >= threshold` instead of `===`. This handles edge cases where a single order pushes the count past the threshold (e.g., threshold=5, customer at 4, orders 2 items → count=6). The `CrmTriggerAchievement` record prevents re-firing in once mode; in reset mode, the sinceDate resets to the achievement date.
 
 ### Match Mode
 
@@ -547,7 +563,7 @@ The `=== threshold` check is critical: using `>=` would fire on every order afte
 
 ### Dedup
 
-Uses the same `hasOrderBeenProcessedForFlow` order-level dedup as `order_completed`, `new_order`, and `item_ordered` — one fire per order per flow.
+Uses `CrmTriggerAchievement` records for threshold dedup (once mode blocks re-firing, reset mode tracks sinceDate). Also uses `hasOrderBeenProcessedForFlow` for order-level dedup — one fire per order per flow.
 
 ## Time-Based Trigger Architecture
 

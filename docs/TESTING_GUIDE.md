@@ -1581,17 +1581,59 @@ Create a config with 2 items and `matchMode: 'all'`:
 
 #### item_ordered_x_times — Cumulative Count Threshold
 
-**Step 1: Create a flow with item_ordered_x_times trigger**
+**Step 1: Create a flow with item_ordered_x_times trigger (once mode — default)**
 ```bash
 curl -X POST http://localhost:3001/api/v1/flows \
   -H "Authorization: Bearer TOKEN" -H "X-Restaurant-Id: REST_ID" \
   -H "Content-Type: application/json" \
   -d '{
-    "name": "Loyalty Item Test",
-    "description": "Fires on 3rd order of a specific item",
+    "name": "Loyalty Item Test (Once)",
+    "description": "Fires once on 3rd order of a specific item",
     "nodes": [
       {"id":"t1","type":"trigger","subType":"item_ordered_x_times","label":"Item Ordered 3 Times","config":{"items":[{"menuItemId":"MENU_ITEM_ID","menuItemName":"Margherita Pizza","modifiers":[]}],"matchMode":"any","threshold":3},"position":{"x":100,"y":100}},
-      {"id":"a1","type":"action","subType":"send_email","label":"Loyalty Reward","config":{"recipients":[{"type":"customer"}],"subject":"Loyalty reward!","body":"You have ordered {{matched_item.name}} {{matched_item.total_orders}} times! Here is a discount."},"position":{"x":100,"y":300}}
+      {"id":"a1","type":"action","subType":"send_email","label":"Loyalty Reward","config":{"recipients":[{"type":"customer"}],"subject":"Loyalty reward!","body":"You have ordered Margherita Pizza 3 times! Here is a discount."},"position":{"x":100,"y":300}}
+    ],
+    "edges": [
+      {"id":"e1","sourceNodeId":"t1","targetNodeId":"a1"}
+    ]
+  }'
+```
+
+**Step 2: Activate the flow** (sets `activatedAt` — counting starts from now)
+
+**Step 3: Simulate 3 completed orders for the same customer containing the configured menu item**
+
+**Step 4: Verify the trigger fires on the 3rd order (at-least threshold)**
+```javascript
+// Should have exactly 1 execution
+db.crm_flow_executions.find({ flowId: ObjectId('<FLOW_ID>'), 'context.customerId': '<CUSTOMER_ID>' }).count()
+// Expected: 1
+
+// Achievement record should exist
+db.crm_trigger_achievements.findOne({ flowId: ObjectId('<FLOW_ID>'), contactId: ObjectId('<CONTACT_ID>') })
+// Expected: { count: 3, threshold: 3, resetCount: 0 }
+```
+
+**Step 5: Verify the 4th order does NOT re-fire** (once mode — achievement exists)
+```javascript
+// After a 4th order with the same item:
+db.crm_flow_executions.find({ flowId: ObjectId('<FLOW_ID>'), 'context.customerId': '<CUSTOMER_ID>' }).count()
+// Expected: still 1 (not 2)
+```
+
+#### item_ordered_x_times — Reset Mode
+
+**Step 1: Create a flow with resetOnThreshold = true**
+```bash
+curl -X POST http://localhost:3001/api/v1/flows \
+  -H "Authorization: Bearer TOKEN" -H "X-Restaurant-Id: REST_ID" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "Loyalty Item Test (Reset)",
+    "description": "Fires every 3rd order of a specific item",
+    "nodes": [
+      {"id":"t1","type":"trigger","subType":"item_ordered_x_times","label":"Every 3rd Pizza","config":{"items":[{"menuItemId":"MENU_ITEM_ID","menuItemName":"Margherita Pizza","modifiers":[]}],"matchMode":"any","threshold":3,"resetOnThreshold":true},"position":{"x":100,"y":100}},
+      {"id":"a1","type":"action","subType":"send_email","label":"Repeat Reward","config":{"recipients":[{"type":"customer"}],"subject":"Another reward!","body":"You have ordered Margherita Pizza again! Here is a discount."},"position":{"x":100,"y":300}}
     ],
     "edges": [
       {"id":"e1","sourceNodeId":"t1","targetNodeId":"a1"}
@@ -1601,36 +1643,28 @@ curl -X POST http://localhost:3001/api/v1/flows \
 
 **Step 2: Activate the flow**
 
-**Step 3: Simulate 3 completed orders for the same customer containing the configured menu item**
+**Step 3: Simulate 3 orders → trigger fires**
 
-**Step 4: Verify the trigger fires only on the 3rd order (exact threshold)**
+**Step 4: Simulate 3 more orders → trigger fires again (counter reset)**
 ```javascript
-// Should have exactly 1 execution (not 0, not 3)
+// After 6 total orders:
 db.crm_flow_executions.find({ flowId: ObjectId('<FLOW_ID>'), 'context.customerId': '<CUSTOMER_ID>' }).count()
-// Expected: 1
+// Expected: 2 (fired at 3rd and 6th)
 
-// The execution should be from the 3rd order
-db.crm_flow_executions.findOne({ flowId: ObjectId('<FLOW_ID>'), 'context.customerId': '<CUSTOMER_ID>' })
-// Expected: context.orderId matches the 3rd order's ID
+// Achievement record should show resetCount
+db.crm_trigger_achievements.find({ flowId: ObjectId('<FLOW_ID>'), contactId: ObjectId('<CONTACT_ID>') })
+// Expected: 2 records — first with resetCount: 1, second with resetCount: 0
 ```
 
-**Step 5: Verify the 4th order does NOT re-fire** (exact equality `===`, not `>=`)
+**Step 5: Verify counting query uses sinceDate**
 ```javascript
-// After a 4th order with the same item:
-db.crm_flow_executions.find({ flowId: ObjectId('<FLOW_ID>'), 'context.customerId': '<CUSTOMER_ID>' }).count()
-// Expected: still 1 (not 2)
-```
-
-**Step 6: Verify cumulative counting query**
-```javascript
-// The aggregation counts across all paid orders
+// The aggregation counts from flow.activatedAt (or last achievement for reset mode)
 db.orders.aggregate([
-  { $match: { restaurantId: ObjectId('REST_ID'), customerId: ObjectId('CUSTOMER_ID'), paymentStatus: 'paid' } },
+  { $match: { restaurantId: ObjectId('REST_ID'), customerId: ObjectId('CUSTOMER_ID'), paymentStatus: 'paid', createdAt: { $gte: ISODate('ACTIVATED_AT') } } },
   { $unwind: '$items' },
   { $match: { 'items.menuItemId': ObjectId('MENU_ITEM_ID') } },
   { $count: 'total' }
 ])
-// Expected: { total: N } where N is the lifetime count
 ```
 
 ### 10.10 Item Ordered with targetStatuses — Multi-Select Status Filtering
