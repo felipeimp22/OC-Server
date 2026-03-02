@@ -222,6 +222,77 @@ export function validateFlowGraph(
     }
   }
 
+  // ── Semantic validation: R-12 through R-19 (node config completeness) ──
+
+  for (const node of nodes) {
+    const config = node.config ?? {};
+    const label = node.label || node.id;
+
+    // ── R-12: Email action must have at least one recipient ────────
+    if (node.type === 'action' && node.subType === 'send_email') {
+      const recipients = config.recipients as unknown[] | undefined;
+      if (!recipients || !Array.isArray(recipients) || recipients.length === 0) {
+        return { valid: false, rule: 'R-12', message: `Email action "${label}" has no recipients configured` };
+      }
+    }
+
+    // ── R-13: Email action must have a subject ─────────────────────
+    if (node.type === 'action' && node.subType === 'send_email') {
+      const subject = config.subject as string | undefined;
+      if (!subject || (subject as string).trim() === '') {
+        return { valid: false, rule: 'R-13', message: `Email action "${label}" has no subject` };
+      }
+    }
+
+    // ── R-14: SMS action must have a body ──────────────────────────
+    if (node.type === 'action' && node.subType === 'send_sms') {
+      const body = config.body as string | undefined;
+      if (!body || (body as string).trim() === '') {
+        return { valid: false, rule: 'R-14', message: `SMS action "${label}" has no message body` };
+      }
+    }
+
+    // ── R-15: SMS custom recipient must have a phone number ────────
+    if (node.type === 'action' && node.subType === 'send_sms') {
+      const recipient = config.recipient as { type?: string; phone?: string } | undefined;
+      if (recipient?.type === 'custom' && (!recipient.phone || recipient.phone.trim() === '')) {
+        return { valid: false, rule: 'R-15', message: `SMS action "${label}" has custom recipient with no phone number` };
+      }
+    }
+
+    // ── R-16: Webhook action must have a valid URL ─────────────────
+    if (node.type === 'action' && node.subType === 'outgoing_webhook') {
+      const url = config.url as string | undefined;
+      if (!url || (url as string).trim() === '' || (!(url as string).startsWith('http://') && !(url as string).startsWith('https://'))) {
+        return { valid: false, rule: 'R-16', message: `Webhook action "${label}" has no URL or invalid URL` };
+      }
+    }
+
+    // ── R-17: Item trigger must have at least one item ─────────────
+    if (node.type === 'trigger' && (node.subType === 'item_ordered' || node.subType === 'item_ordered_x_times')) {
+      const items = config.items as unknown[] | undefined;
+      if (!items || !Array.isArray(items) || items.length === 0) {
+        return { valid: false, rule: 'R-17', message: `Item trigger "${label}" has no menu items configured` };
+      }
+    }
+
+    // ── R-18: Timer delay must have a duration ─────────────────────
+    if (node.type === 'timer' && node.subType === 'delay') {
+      const duration = config.duration as number | undefined;
+      if (!duration || typeof duration !== 'number' || duration <= 0) {
+        return { valid: false, rule: 'R-18', message: `Timer "${label}" has no delay duration set` };
+      }
+    }
+
+    // ── R-19: Timer date_field must have a target date ─────────────
+    if (node.type === 'timer' && node.subType === 'date_field') {
+      const targetDateUtc = config.targetDateUtc as string | undefined;
+      if (!targetDateUtc || (targetDateUtc as string).trim() === '') {
+        return { valid: false, rule: 'R-19', message: `Timer "${label}" has no target date set` };
+      }
+    }
+  }
+
   return { valid: true };
 }
 
