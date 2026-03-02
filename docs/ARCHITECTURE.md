@@ -802,3 +802,38 @@ ActionService.execute() returns { success: false, error: '...' }
 | `crm_flow_execution_logs` | Per-node result: 'success' or 'failure' with error message |
 | `crm_flow_executions.erroredNodes[]` | Node IDs that failed |
 | `crm_communication_logs` | Per-email/SMS send status: 'sent', 'failed', 'skipped' with reason |
+
+## Trigger Achievements
+
+### Purpose
+
+The `crm_trigger_achievements` collection tracks when a contact reaches a cumulative trigger threshold (e.g., item_ordered_x_times). This enables two counting modes:
+
+- **Once mode** (default): The trigger fires exactly once when the threshold is reached. A TriggerAchievement record proves it already fired — subsequent evaluations skip immediately.
+- **Reset mode** (`config.resetOnThreshold = true`): After reaching the threshold, the counter resets. The trigger fires again on the 2nd, 3rd, etc. occurrence. `resetCount` tracks how many times.
+
+### Schema: `crm_trigger_achievements`
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `restaurantId` | ObjectId | Tenant isolation key |
+| `flowId` | ObjectId | Flow that owns the trigger |
+| `contactId` | ObjectId | Contact who reached the threshold |
+| `triggerNodeId` | String | Node ID within the flow |
+| `triggerSubType` | String | e.g., `item_ordered_x_times` |
+| `achievedAt` | Date | When the threshold was reached |
+| `count` | Number | Actual count at time of achievement |
+| `threshold` | Number | Configured threshold value |
+| `resetCount` | Number | How many times reset (reset mode only) |
+| `metadata` | Mixed | Additional context (items matched, etc.) |
+
+**Compound index**: `{ restaurantId, flowId, contactId, triggerNodeId }` for efficient lookups.
+
+### Flow `activatedAt` Field
+
+The `crm_flows.activatedAt` field records when a flow was first activated. It is:
+- `null` for draft flows
+- Set to `new Date()` on first activation
+- Preserved across pause/reactivate cycles (never overwritten)
+
+This field is used by `countItemOrdersByCustomer` to filter orders — only orders placed after the flow was activated are counted toward the threshold.

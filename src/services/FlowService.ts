@@ -118,8 +118,14 @@ export class FlowService {
       throw new FlowValidationError(validation.rule, validation.message);
     }
 
+    // Set activatedAt only on first activation — preserve original date across pause/reactivate
+    const setFields: Record<string, unknown> = { status: 'active' };
+    if (!flow.activatedAt) {
+      setFields.activatedAt = new Date();
+    }
+
     const updated = await this.flowRepo.updateById(restaurantId, flowId, {
-      $set: { status: 'active' },
+      $set: setFields,
     });
 
     if (updated) {

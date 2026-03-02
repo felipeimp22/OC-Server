@@ -18,3 +18,4 @@ export { CampaignRepository } from './CampaignRepository.js';
 export { TaskRepository } from './TaskRepository.js';
 export { LinkTrackingRepository } from './LinkTrackingRepository.js';
 export { ProcessedEventRepository } from './ProcessedEventRepository.js';
+export { TriggerAchievementRepository } from './TriggerAchievementRepository.js';

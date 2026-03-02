@@ -96,6 +96,8 @@ export interface IFlowDocument extends Document {
   edges: IFlowEdge[];
   /** Denormalized execution statistics */
   stats: IFlowStats;
+  /** When the flow was first activated (null for draft flows, preserved across pause/reactivate) */
+  activatedAt: Date | null;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -154,6 +156,7 @@ const FlowSchema = new Schema<IFlowDocument>(
     nodes: { type: [FlowNodeSchema], default: [] },
     edges: { type: [FlowEdgeSchema], default: [] },
     stats: { type: FlowStatsSchema, default: () => ({ enrollments: 0, completions: 0, activeEnrollments: 0 }) },
+    activatedAt: { type: Date, default: null },
   },
   {
     collection: 'crm_flows',
