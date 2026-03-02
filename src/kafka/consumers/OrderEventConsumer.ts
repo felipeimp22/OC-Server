@@ -173,27 +173,39 @@ export class OrderEventConsumer {
       orderTotal,
     );
 
-    // Build trigger context — fetch order items from DB (events don't publish items)
+    // Fetch order from DB for items AND paymentStatus fallback (events don't always publish these)
     let items: Array<{ menuItemId: string; name: string; price: number; quantity: number; options: Array<{ name: string; choice: string; priceAdjustment: number }> }> = [];
+    let orderDoc: Record<string, any> | null = null;
     if (orderId) {
       try {
-        const order = await Order.findById(orderId).lean().exec();
-        if (order?.items && Array.isArray(order.items)) {
-          items = order.items.map((item: any) => ({
+        orderDoc = await Order.findById(orderId).lean().exec();
+        if (orderDoc?.items && Array.isArray(orderDoc.items)) {
+          items = orderDoc.items.map((item: any) => ({
             menuItemId: String(item.menuItemId),
             name: item.name,
             price: item.price,
             quantity: item.quantity,
-            options: (item.options ?? []).map((opt: any) => ({
+            options: Array.isArray(item.options) ? item.options.map((opt: any) => ({
               name: opt.name,
               choice: opt.choice,
               priceAdjustment: opt.priceAdjustment ?? 0,
-            })),
+            })) : [],
           }));
         }
+        if (items.length === 0) {
+          log.warn({ orderId }, 'Order items empty after fetch — item_ordered triggers will not fire');
+        }
       } catch (err) {
-        log.warn({ err, orderId }, 'Failed to fetch order items for trigger context');
+        log.warn({ err, orderId }, 'Failed to fetch order for trigger context — items and paymentStatus may be missing');
       }
+    }
+
+    // Resolve paymentStatus: prefer Kafka payload, fall back to Order document
+    const resolvedPaymentStatus = (payload.paymentStatus as string | undefined)
+      ?? (orderDoc?.paymentStatus as string | undefined)
+      ?? (orderDoc?.payment?.status as string | undefined);
+    if (!resolvedPaymentStatus) {
+      log.warn({ orderId }, 'paymentStatus could not be resolved from payload or Order document — payment guard will block all triggers');
     }
 
     const triggerContext = {
@@ -205,7 +217,7 @@ export class OrderEventConsumer {
       customerPhone: payload.customerPhone as string | undefined,
       orderType: payload.orderType as string | undefined,
       orderTotal,
-      paymentStatus: payload.paymentStatus as string | undefined,
+      paymentStatus: resolvedPaymentStatus,
       status: payload.status as string | undefined,
       items,
     };
@@ -325,11 +337,11 @@ export class OrderEventConsumer {
             name: item.name,
             price: item.price,
             quantity: item.quantity,
-            options: (item.options ?? []).map((opt: any) => ({
+            options: Array.isArray(item.options) ? item.options.map((opt: any) => ({
               name: opt.name,
               choice: opt.choice,
               priceAdjustment: opt.priceAdjustment ?? 0,
-            })),
+            })) : [],
           }));
         }
       } catch (err) {

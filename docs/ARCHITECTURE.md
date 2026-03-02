@@ -701,3 +701,66 @@ FlowEngineService.processCurrentNode() → case 'timer'
 |---------|--------|-------------|
 | `delay` | `{ duration: number, unit: 'minutes'\|'hours'\|'days' }` | `duration * unitMs` from now |
 | `date_field` | `{ targetDateUtc: string }` | Absolute UTC date/time (must be in the future) |
+
+## Email Delivery Pipeline
+
+Full trace from trigger to email delivery, including all validation points and failure modes:
+
+```
+Kafka event (order.completed / order.status_changed)
+  → OrderEventConsumer.processOrderAsCompleted()
+    1. tryProcessEvent('order_completed_process:${orderId}') — idempotency guard
+    2. contactService.upsertFromEvent() — ensure CRM contact exists
+    3. Fetch order from DB (Order.findById) — for items AND paymentStatus fallback
+       ⚠ FAILURE MODE: If DB fetch fails, items=[] and paymentStatus may be undefined
+       ⚠ FAILURE MODE: If item.options is not an array, defensive Array.isArray check prevents crash
+    4. Resolve paymentStatus: payload.paymentStatus ?? orderDoc.paymentStatus ?? orderDoc.payment.status
+       ⚠ FAILURE MODE: If none set, payment guard blocks ALL triggers
+    5. Build triggerContext with resolved paymentStatus + items
+    6. evaluateTriggers('item_ordered', ...) — only called when items.length > 0
+
+  → TriggerService.evaluateTriggers()
+    7. findActiveByTrigger(restaurantId, 'item_ordered') — queries nodes.subType at top level
+       ⚠ FAILURE MODE: If subType nested in data (React Flow format saved incorrectly), no flows found
+    8. evaluateSingleFlow() → checkTriggerConditions()
+       a. Payment guard: paymentStatus must be 'paid' or 'succeeded' — rejects undefined
+       b. Item matching: String(oi.menuItemId) === String(configItem.menuItemId)
+          Both sides produce 24-char hex strings (ObjectId → String)
+       c. targetStatuses check (optional)
+    9. Order-level dedup: hasOrderBeenProcessedForFlow()
+   10. Anti-spam: isContactEnrolled()
+   11. enrollContact() → create FlowExecution → processCurrentNode()
+
+  → FlowEngineService.processCurrentNode()
+   12. Load execution, flow, contact
+   13. Enrich context with restaurant data (_restaurant)
+   14. processNode() → case 'action' → ActionService.execute()
+
+  → ActionService.execute()
+   15. buildContext(contact, executionContext, restaurantData) — async, fetches items from DB if needed
+   16. executeSendEmail()
+       a. Resolve recipients: customer→contact.email, restaurant→restaurant.email, staff→user.email, custom→literal
+          ⚠ FAILURE MODE: Customer email null → warning logged, recipient skipped
+       b. If resolvedEmails is empty → returns { success: false } (not silent anymore)
+       c. Call CommunicationService.sendEmail()
+
+  → CommunicationService.sendEmail()
+   17. Validate recipients (filter empty)
+       ⚠ FAILURE MODE: All empty → creates 'skipped' log, returns early
+   18. Check emailOptIn — if contact opted out, skip with 'opted_out' reason
+   19. Interpolate subject + body with {{variable}} replacement
+   20. Create CommunicationLog (status: 'queued')
+   21. Send via MailgunProvider with retry (3 attempts)
+       ⚠ FAILURE MODE: Mailgun error → CommunicationLog updated to 'failed'
+   22. Update CommunicationLog to 'sent' on success
+```
+
+### Common Failure Points
+
+| # | Failure | Impact | Fix Applied |
+|---|---------|--------|-------------|
+| 3 | Order DB fetch fails | items=[], item triggers never fire | Warning logged, items checked before evaluating |
+| 4 | paymentStatus undefined | Payment guard blocks all triggers | Fallback chain: payload → orderDoc.paymentStatus → orderDoc.payment.status |
+| 7 | subType nested in data | No flows found for trigger | Transform layer in useFlowBuilderStore (fromReactFlowNodes) |
+| 16a | Customer email null | Recipient skipped, email not sent | Warning logged per recipient |
+| 16b | All recipients empty | Previously returned success silently | Now returns { success: false } with error message |

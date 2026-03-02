@@ -103,7 +103,11 @@ export class ActionService {
 
       for (const recipient of recipients) {
         if (recipient.type === 'customer') {
-          if (contact.email) resolvedEmails.push(contact.email);
+          if (contact.email) {
+            resolvedEmails.push(contact.email);
+          } else {
+            log.warn({ contactId: contact._id.toString() }, 'Customer recipient has no email — skipping this recipient');
+          }
         } else if (recipient.type === 'restaurant') {
           const restaurant = await Restaurant.findById(restaurantId).lean();
           if (restaurant?.email) resolvedEmails.push(restaurant.email);
@@ -113,6 +117,11 @@ export class ActionService {
         } else if (recipient.type === 'custom') {
           if (recipient.email) resolvedEmails.push(recipient.email);
         }
+      }
+
+      if (resolvedEmails.length === 0) {
+        log.warn({ contactId: contact._id.toString(), recipientCount: recipients.length }, 'No recipients resolved — all recipient types returned empty');
+        return { success: false, action: 'send_email', error: 'No recipients resolved — all recipient types returned empty (customer email null? staff deleted? custom email empty?)' };
       }
 
       await this.communicationService.sendEmail({
