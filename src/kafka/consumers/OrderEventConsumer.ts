@@ -271,8 +271,13 @@ export class OrderEventConsumer {
       return;
     }
 
-    const contact = await this.contactService.getByCustomerId(restaurantId, customerId);
-    if (!contact) return;
+    // Use upsertFromEvent instead of getByCustomerId — first-time customers
+    // placing their first order should still trigger order_status_changed flows
+    const contact = await this.contactService.upsertFromEvent(restaurantId, {
+      customerId,
+      name: payload.customerName as string | undefined,
+      email: payload.customerEmail as string | undefined,
+    });
 
     const newStatus = (payload.status ?? payload.newStatus) as string | undefined;
 
