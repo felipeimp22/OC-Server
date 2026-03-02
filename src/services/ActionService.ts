@@ -124,12 +124,22 @@ export class ActionService {
         return { success: false, action: 'send_email', error: 'No recipients resolved — all recipient types returned empty (customer email null? staff deleted? custom email empty?)' };
       }
 
+      const subject = node.config.subject as string | undefined;
+      if (!subject || subject.trim() === '') {
+        return { success: false, action: 'send_email', error: 'Email subject is empty' };
+      }
+
+      const body = node.config.body as string | undefined;
+      if (!body || body.trim() === '') {
+        log.warn({ contactId: contact._id.toString() }, 'Email body is empty — sending anyway');
+      }
+
       await this.communicationService.sendEmail({
         restaurantId,
         contactId: contact._id.toString(),
         to: resolvedEmails,
-        subject: node.config.subject as string | undefined,
-        body: node.config.body as string | undefined,
+        subject,
+        body,
         context,
         flowId,
         executionId,
@@ -153,7 +163,7 @@ export class ActionService {
 
     if (!recipient || recipient.type === 'customer') {
       if (!contact.phone) {
-        return { success: true, action: 'send_sms', metadata: { skipped: true, reason: 'no_phone' } };
+        return { success: false, action: 'send_sms', error: 'No SMS recipient resolved' };
       }
       to = `${contact.phone.countryCode}${contact.phone.number}`;
     } else if (recipient.type === 'restaurant') {
@@ -164,14 +174,19 @@ export class ActionService {
     }
 
     if (!to) {
-      return { success: true, action: 'send_sms', metadata: { skipped: true, reason: 'no_phone' } };
+      return { success: false, action: 'send_sms', error: 'No SMS recipient resolved' };
+    }
+
+    const smsBody = node.config.body as string | undefined;
+    if (!smsBody || smsBody.trim() === '') {
+      return { success: false, action: 'send_sms', error: 'SMS body is empty' };
     }
 
     await this.communicationService.sendSMS({
       restaurantId,
       contactId: contact._id.toString(),
       to,
-      body: node.config.body as string | undefined,
+      body: smsBody,
       context,
       flowId,
       executionId,
@@ -185,7 +200,12 @@ export class ActionService {
   ): Promise<ActionResult> {
     const { url, body } = node.config as { url?: string; body?: string };
 
-    if (!url) return { success: false, action: 'outgoing_webhook', error: 'No URL in config' };
+    if (!url || url.trim() === '') {
+      return { success: false, action: 'outgoing_webhook', error: 'Webhook URL is empty' };
+    }
+    if (!url.startsWith('http://') && !url.startsWith('https://')) {
+      return { success: false, action: 'outgoing_webhook', error: 'Webhook URL is invalid' };
+    }
 
     let payload: Record<string, unknown>;
     try {

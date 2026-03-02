@@ -234,6 +234,17 @@ export class FlowEngineService {
           `Action ${node.subType}: ${result.success ? 'completed' : result.error}`,
           result.metadata,
         );
+
+        if (!result.success) {
+          // Mark the node as errored — move from pendingNodes to erroredNodes
+          log.warn({ executionId, nodeId: node.id, error: result.error }, 'Action failed — marking node as errored');
+          const updated = await this.executionRepo.errorNode(executionId, node.id);
+          // Still advance to downstream nodes (don't halt the entire flow for one action failure)
+          await this.advanceToNext(execution, flow, node, null);
+          await this.checkExecutionCompletion(updated, execution);
+          return { paused: true }; // Signal caller not to track completion (we handled it)
+        }
+
         // Continue to downstream nodes (action chaining / fan-out)
         await this.advanceToNext(execution, flow, node, null);
         return { paused: false };

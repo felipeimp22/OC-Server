@@ -764,3 +764,41 @@ Kafka event (order.completed / order.status_changed)
 | 7 | subType nested in data | No flows found for trigger | Transform layer in useFlowBuilderStore (fromReactFlowNodes) |
 | 16a | Customer email null | Recipient skipped, email not sent | Warning logged per recipient |
 | 16b | All recipients empty | Previously returned success silently | Now returns { success: false } with error message |
+
+## Action Failure Handling
+
+When an action node fails, the failure is recorded but **the flow continues** — sibling and downstream branches are not halted.
+
+### Per-Action Validation
+
+Each action type validates its configuration before execution:
+
+| Action | Check | Error |
+|--------|-------|-------|
+| `send_email` | No recipients resolved | `No recipients resolved — all recipient types returned empty` |
+| `send_email` | Subject empty/undefined | `Email subject is empty` |
+| `send_email` | Body empty/undefined | Warning logged, email still sent (empty body is valid but unusual) |
+| `send_sms` | Recipient phone empty | `No SMS recipient resolved` |
+| `send_sms` | Body empty | `SMS body is empty` |
+| `outgoing_webhook` | URL empty | `Webhook URL is empty` |
+| `outgoing_webhook` | URL doesn't start with http(s):// | `Webhook URL is invalid` |
+
+### Failure Flow
+
+```
+ActionService.execute() returns { success: false, error: '...' }
+  → FlowEngineService.processNode() logs failure to FlowExecutionLog
+  → executionRepo.errorNode() moves nodeId from pendingNodes to erroredNodes
+  → advanceToNext() still dispatches downstream nodes (flow continues)
+  → checkExecutionCompletion() determines final status:
+    - All branches errored → execution status: 'error'
+    - Some branches completed → execution status: 'completed' (partial errors tolerated)
+```
+
+### Where Failures Are Recorded
+
+| Location | What's Recorded |
+|----------|-----------------|
+| `crm_flow_execution_logs` | Per-node result: 'success' or 'failure' with error message |
+| `crm_flow_executions.erroredNodes[]` | Node IDs that failed |
+| `crm_communication_logs` | Per-email/SMS send status: 'sent', 'failed', 'skipped' with reason |
