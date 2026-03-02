@@ -216,7 +216,7 @@ Email/SMS inline composers use `{{dot.notation}}` variables scoped to the trigge
 |---------|---------------------|
 | `new_order` (fires on payment.succeeded — uses upsertFromEvent for first-time customers, does NOT increment stats) | `{{order.total}}`, `{{order.number}}`, `{{payment.method}}` |
 | `order_completed` (fires once on first qualifying fulfillment status: ready, out_for_delivery, delivered, completed), `first_order`, `nth_order` | `{{order.total}}`, `{{order.number}}`, `{{order.items_summary}}`, `{{order.date}}` |
-| `order_status_changed` (supports `config.targetStatus` filter — if set, fires only when `newStatus` matches; if empty/unset, fires on every status change) | `{{order.number}}`, `{{order.status}}` |
+| `order_status_changed` (supports `config.targetStatuses: string[]` filter — if set, fires only when `newStatus` is in the array; if empty/unset, fires on every status change. `config.runOnce: boolean` controls per-order dedup.) | `{{order.number}}`, `{{order.status}}` |
 | `abandoned_cart` | `{{cart.items_summary}}`, `{{cart.total}}`, `{{cart.abandon_time}}` |
 | `no_order_in_x_days` | `{{customer.last_order_date}}`, `{{customer.days_since_order}}` |
 | `item_ordered` | `{{order.total}}`, `{{order.number}}`, `{{order.items_summary}}`, `{{order.date}}`, `{{matched_item.name}}`, `{{matched_item.price}}` |
@@ -248,15 +248,18 @@ Each trigger node stores its configuration in `node.config`. The backend reads t
 | `order_completed` | `minOrderTotal` | `number` | — | `TriggerService.checkTriggerConditions()` |
 | `nth_order` | `n` | `number` | 5 | `TriggerService.checkTriggerConditions()` |
 | `no_order_in_x_days` | `days` | `number` | 30 | `InactivityChecker.ts` (line ~72) |
-| `order_status_changed` | `targetStatus` | `string` | — (any) | `TriggerService.checkTriggerConditions()` |
+| `order_status_changed` | `targetStatuses` | `string[]` | — (any) | `TriggerService.checkTriggerConditions()` — array of statuses to match. Empty/undefined = any status change. Legacy `targetStatus` (string) is auto-converted to `[targetStatus]`. |
+| `order_status_changed` | `runOnce` | `boolean` | `false` | `TriggerService.evaluateSingleFlow()` — when true, fires only once per order (permanent dedup via `hasOrderBeenProcessedForFlow`). |
 | `abandoned_cart` | `delayDays` | `number` | 1 | `CartEventConsumer.handleCartAbandoned()` — schedules BullMQ delayed job with `delayDays * 86400000` ms delay (1–90 days) |
 | `first_order` | — | — | — | — |
 | `new_order` | — | — | — | — |
 | `item_ordered` | `items` | `Array<{ menuItemId, menuItemName, modifiers?[] }>` | — | `TriggerService.checkTriggerConditions()` |
 | `item_ordered` | `matchMode` | `'any' \| 'all'` | `'any'` | `TriggerService.checkTriggerConditions()` |
+| `item_ordered` | `targetStatuses` | `string[]` | — (any) | `TriggerService.checkTriggerConditions()` — optional filter by order status at time of trigger. |
 | `item_ordered_x_times` | `items` | `Array<{ menuItemId, menuItemName, modifiers?[] }>` | — | `TriggerService.checkTriggerConditions()` |
 | `item_ordered_x_times` | `matchMode` | `'any' \| 'all'` | `'any'` | `TriggerService.checkTriggerConditions()` |
 | `item_ordered_x_times` | `threshold` | `number` (min 2) | — | `TriggerService.checkTriggerConditions()` |
+| `item_ordered_x_times` | `targetStatuses` | `string[]` | — (any) | `TriggerService.checkTriggerConditions()` — optional filter by order status at time of trigger. |
 
 ---
 

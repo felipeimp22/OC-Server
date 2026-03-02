@@ -821,7 +821,7 @@ This tests sync-contacts, seed, flow creation/activation, Kafka event publishing
 
 ## 10. Trigger System Testing
 
-This section covers testing triggers, execution features, and item-based triggers in the CRM engine. Subsections 10.1–10.7 cover the original trigger types: **order_completed** (fulfillment statuses), **order_status_changed** (targetStatus filter), **new_order** (payment.succeeded), template variables, and abandoned cart. Subsection 10.8 covers **action chaining and fan-out** (v3). Subsection 10.9 covers **item_ordered** and **item_ordered_x_times** triggers (v3). Each subsection includes copy-paste commands, expected server logs, and MongoDB verification queries.
+This section covers testing triggers, execution features, and item-based triggers in the CRM engine. Subsections 10.1–10.7 cover the original trigger types: **order_completed** (fulfillment statuses), **order_status_changed** (targetStatuses multi-select filter), **new_order** (payment.succeeded), template variables, and abandoned cart. Subsection 10.8 covers **action chaining and fan-out** (v3). Subsection 10.9 covers **item_ordered** and **item_ordered_x_times** triggers (v3). Subsection 10.10 covers **multi-select status filtering** (targetStatuses array for item triggers). Subsection 10.11 covers the **runOnce toggle** for order_status_changed. Subsection 10.12 covers **payment status enforcement** (universal guard). Each subsection includes copy-paste commands, expected server logs, and MongoDB verification queries.
 
 **Prerequisites**: Kafka running (`ENABLE_KAFKA=true`), an existing restaurant ID, and at least one customer ID in the database. Replace `YOUR_RESTAURANT_ID` and `YOUR_CUSTOMER_ID` with real ObjectId strings throughout.
 
@@ -955,11 +955,11 @@ db.crm_processed_events.findOne({ eventId: "order_completed_process:order-test-0
 
 ---
 
-### 10.3 Order Status Changed — targetStatus Filter
+### 10.3 Order Status Changed — targetStatuses Filter (Multi-Select)
 
-The `order_status_changed` trigger supports a `config.targetStatus` filter. If set, the trigger fires only when the new status matches. If empty or unset, it fires on every status change.
+The `order_status_changed` trigger supports `config.targetStatuses: string[]` (array). If set with one or more statuses, the trigger fires only when the new status is in the array. If empty or unset, it fires on every status change. Legacy `config.targetStatus` (single string) is auto-converted to `[targetStatus]` for backward compatibility.
 
-#### Setup: Create a flow with targetStatus = 'confirmed'
+#### Setup: Create a flow with targetStatuses = ['confirmed', 'ready']
 
 ```bash
 curl -s -X POST http://localhost:3001/api/v1/flows \
@@ -967,12 +967,12 @@ curl -s -X POST http://localhost:3001/api/v1/flows \
   -H "X-Restaurant-Id: YOUR_RESTAURANT_ID" \
   -H "Content-Type: application/json" \
   -d '{
-    "name": "Test Status Changed — Confirmed Only",
+    "name": "Test Status Changed — Confirmed or Ready",
     "nodes": [
       { "id": "t1", "type": "trigger", "subType": "order_status_changed", "label": "Status Changed",
-        "config": { "targetStatus": "confirmed" }, "position": {"x":0,"y":0} },
-      { "id": "a1", "type": "action", "subType": "send_email", "label": "Confirmed Email",
-        "config": { "recipients": [{"type":"customer"}], "subject": "Order Confirmed!", "body": "Your order has been confirmed." },
+        "config": { "targetStatuses": ["confirmed", "ready"] }, "position": {"x":0,"y":0} },
+      { "id": "a1", "type": "action", "subType": "send_email", "label": "Status Email",
+        "config": { "recipients": [{"type":"customer"}], "subject": "Order Update!", "body": "Your order status has changed." },
         "position": {"x":0,"y":150} }
     ],
     "edges": [{ "id": "e1", "sourceNodeId": "t1", "targetNodeId": "a1" }]
@@ -987,12 +987,12 @@ curl -s -X POST http://localhost:3001/api/v1/flows/FLOW_ID/activate \
 #### Test A: Non-matching status — trigger does NOT fire
 
 ```bash
-echo '{"eventType":"order.status_changed","restaurantId":"YOUR_RESTAURANT_ID","payload":{"orderId":"order-test-003","orderNumber":"ORD-003","customerId":"YOUR_CUSTOMER_ID","customerEmail":"test@example.com","customerName":"Test User","customerPhone":"+15551234567","orderType":"delivery","orderTotal":30.00,"paymentStatus":"paid","status":"preparing","previousStatus":"pending"}}' | kcat -b localhost:9092 -t orderchop.orders -P
+echo '{"eventType":"order.status_changed","restaurantId":"YOUR_RESTAURANT_ID","payload":{"orderId":"order-test-003","orderNumber":"ORD-003","customerId":"YOUR_CUSTOMER_ID","customerEmail":"test@example.com","customerName":"Test User","customerPhone":"+15551234567","orderType":"delivery","orderTotal":30.00,"paymentStatus":"paid","newStatus":"preparing","previousStatus":"pending","status":"preparing"}}' | kcat -b localhost:9092 -t orderchop.orders -P
 ```
 
 **Expected server logs:**
 ```
-[TriggerService] targetStatus mismatch {"configuredStatus":"confirmed","actualStatus":"preparing","reason":"targetStatus mismatch"}
+[TriggerService] targetStatuses mismatch {"configuredStatuses":["confirmed","ready"],"actualStatus":"preparing","reason":"targetStatuses mismatch"}
 ```
 
 **Verify — no execution created:**
@@ -1007,7 +1007,7 @@ db.crm_flow_executions.find({
 #### Test B: Matching status — trigger fires
 
 ```bash
-echo '{"eventType":"order.status_changed","restaurantId":"YOUR_RESTAURANT_ID","payload":{"orderId":"order-test-004","orderNumber":"ORD-004","customerId":"YOUR_CUSTOMER_ID","customerEmail":"test@example.com","customerName":"Test User","customerPhone":"+15551234567","orderType":"delivery","orderTotal":30.00,"paymentStatus":"paid","status":"confirmed","previousStatus":"pending"}}' | kcat -b localhost:9092 -t orderchop.orders -P
+echo '{"eventType":"order.status_changed","restaurantId":"YOUR_RESTAURANT_ID","payload":{"orderId":"order-test-004","orderNumber":"ORD-004","customerId":"YOUR_CUSTOMER_ID","customerEmail":"test@example.com","customerName":"Test User","customerPhone":"+15551234567","orderType":"delivery","orderTotal":30.00,"paymentStatus":"paid","newStatus":"confirmed","previousStatus":"pending","status":"confirmed"}}' | kcat -b localhost:9092 -t orderchop.orders -P
 ```
 
 **Expected:** Flow fires, contact enrolled.
@@ -1021,9 +1021,13 @@ db.crm_flow_executions.find({
 // Expected: 1
 ```
 
-#### Test C: Empty targetStatus — fires on every status change
+#### Test C: Empty targetStatuses — fires on every status change
 
-Create a second flow with `"config": {}` (no targetStatus), activate it, then send any status change — it should fire for every status.
+Create a second flow with `"config": {}` (no targetStatuses), activate it, then send any status change — it should fire for every status.
+
+#### Test D: Legacy targetStatus (single string) — backward compatibility
+
+Create a flow with the old format: `"config": { "targetStatus": "confirmed" }`. The backend auto-converts this to `targetStatuses: ["confirmed"]`. Send a status change to `confirmed` — trigger should fire. Send a status change to `preparing` — trigger should NOT fire.
 
 ---
 
@@ -1628,6 +1632,203 @@ db.orders.aggregate([
 ])
 // Expected: { total: N } where N is the lifetime count
 ```
+
+### 10.10 Item Ordered with targetStatuses — Multi-Select Status Filtering
+
+The `item_ordered` and `item_ordered_x_times` triggers support an optional `config.targetStatuses: string[]` array that restricts which order statuses the trigger fires on.
+
+#### Setup: Create a flow with item_ordered + targetStatuses = ['delivered', 'completed']
+
+```bash
+curl -X POST http://localhost:3001/api/v1/flows \
+  -H "Authorization: Bearer TOKEN" -H "X-Restaurant-Id: REST_ID" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "Item Ordered — Delivered/Completed Only",
+    "nodes": [
+      {"id":"t1","type":"trigger","subType":"item_ordered","label":"Item Ordered","config":{"items":[{"menuItemId":"MENU_ITEM_ID","menuItemName":"Margherita Pizza","modifiers":[]}],"matchMode":"any","targetStatuses":["delivered","completed"]},"position":{"x":100,"y":100}},
+      {"id":"a1","type":"action","subType":"send_email","label":"Item Promo","config":{"recipients":[{"type":"customer"}],"subject":"Thanks for the pizza!","body":"Enjoy your {{matched_item.name}}."},"position":{"x":100,"y":300}}
+    ],
+    "edges": [{"id":"e1","sourceNodeId":"t1","targetNodeId":"a1"}]
+  }'
+
+# Activate the flow
+curl -s -X POST http://localhost:3001/api/v1/flows/FLOW_ID/activate \
+  -H "Authorization: Bearer TOKEN" -H "X-Restaurant-Id: REST_ID"
+```
+
+#### Test A: Order status = 'ready' — trigger does NOT fire (not in targetStatuses)
+
+Send an order.status_changed event with status `ready` for an order containing the configured menu item.
+
+**Expected server logs:**
+```
+[TriggerService] targetStatuses mismatch {"configuredStatuses":["delivered","completed"],"actualStatus":"ready","reason":"targetStatuses mismatch"}
+```
+
+**Verify — no execution:**
+```javascript
+db.crm_flow_executions.find({ flowId: ObjectId('FLOW_ID'), 'context.orderId': 'ORDER_ID' }).count()
+// Expected: 0
+```
+
+#### Test B: Order status = 'delivered' — trigger SHOULD fire
+
+Send an order.status_changed event with status `delivered` for the same order.
+
+**Expected:** Flow fires because `delivered` is in `targetStatuses`. The order is fetched from DB to verify items match, then the contact is enrolled.
+
+**Verify — execution created:**
+```javascript
+db.crm_flow_executions.find({ flowId: ObjectId('FLOW_ID'), 'context.orderId': 'ORDER_ID' }).count()
+// Expected: 1
+```
+
+#### Test C: Order status = 'completed' — trigger does NOT fire again (dedup)
+
+Send an order.status_changed event with status `completed` for the same order.
+
+**Expected:** Even though `completed` is in `targetStatuses`, `hasOrderBeenProcessedForFlow` blocks re-enrollment because the order was already enrolled in Test B.
+
+**Verify — still exactly one execution:**
+```javascript
+db.crm_flow_executions.find({ flowId: ObjectId('FLOW_ID'), 'context.orderId': 'ORDER_ID' }).count()
+// Expected: 1 (no duplicate)
+```
+
+#### Test D: Item Ordered with no targetStatuses — fires on first qualifying status
+
+Create a flow with `"config": { "items": [...], "matchMode": "any" }` (no `targetStatuses`). The trigger fires on the first qualifying fulfillment status (ready, out_for_delivery, delivered, completed) via `processOrderAsCompleted`.
+
+---
+
+### 10.11 Order Status Changed — runOnce Toggle
+
+The `order_status_changed` trigger supports `config.runOnce: boolean`. When true, the flow fires only the first time an order matches a selected status — subsequent matching status changes for the same order are blocked via `hasOrderBeenProcessedForFlow`.
+
+#### Setup: Create two flows — one with runOnce=true, one with runOnce=false
+
+```bash
+# Flow A: runOnce=true — fires only once per order
+curl -X POST http://localhost:3001/api/v1/flows \
+  -H "Authorization: Bearer TOKEN" -H "X-Restaurant-Id: REST_ID" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "Status Changed — RunOnce ON",
+    "nodes": [
+      {"id":"t1","type":"trigger","subType":"order_status_changed","label":"Status Changed","config":{"targetStatuses":["confirmed","ready"],"runOnce":true},"position":{"x":100,"y":100}},
+      {"id":"a1","type":"action","subType":"send_email","label":"Status Email","config":{"recipients":[{"type":"customer"}],"subject":"Order update!","body":"Your order status changed."},"position":{"x":100,"y":300}}
+    ],
+    "edges": [{"id":"e1","sourceNodeId":"t1","targetNodeId":"a1"}]
+  }'
+
+# Flow B: runOnce=false (or omitted) — fires on every matching status change
+curl -X POST http://localhost:3001/api/v1/flows \
+  -H "Authorization: Bearer TOKEN" -H "X-Restaurant-Id: REST_ID" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "Status Changed — RunOnce OFF",
+    "nodes": [
+      {"id":"t1","type":"trigger","subType":"order_status_changed","label":"Status Changed","config":{"targetStatuses":["confirmed","ready"],"runOnce":false},"position":{"x":100,"y":100}},
+      {"id":"a1","type":"action","subType":"send_email","label":"Status Email","config":{"recipients":[{"type":"customer"}],"subject":"Order update!","body":"Your order status changed."},"position":{"x":100,"y":300}}
+    ],
+    "edges": [{"id":"e1","sourceNodeId":"t1","targetNodeId":"a1"}]
+  }'
+
+# Activate both flows
+```
+
+#### Test A: runOnce=true — fires on 'confirmed', does NOT fire again on 'ready'
+
+```bash
+# Status change to 'confirmed'
+echo '{"eventType":"order.status_changed","restaurantId":"REST_ID","payload":{"orderId":"order-runonce-001","orderNumber":"ORD-RO1","customerId":"CUST_ID","customerEmail":"test@example.com","customerName":"Test User","customerPhone":"+15551234567","orderType":"delivery","orderTotal":30.00,"paymentStatus":"paid","newStatus":"confirmed","previousStatus":"pending","status":"confirmed"}}' | kcat -b localhost:9092 -t orderchop.orders -P
+```
+
+**Expected:** Flow A fires — contact enrolled.
+
+```bash
+# Same order, status change to 'ready'
+echo '{"eventType":"order.status_changed","restaurantId":"REST_ID","payload":{"orderId":"order-runonce-001","orderNumber":"ORD-RO1","customerId":"CUST_ID","customerEmail":"test@example.com","customerName":"Test User","customerPhone":"+15551234567","orderType":"delivery","orderTotal":30.00,"paymentStatus":"paid","newStatus":"ready","previousStatus":"confirmed","status":"ready"}}' | kcat -b localhost:9092 -t orderchop.orders -P
+```
+
+**Expected server logs:**
+```
+[TriggerService] order_status_changed runOnce: order already processed {"flowId":"FLOW_A_ID","orderId":"order-runonce-001"}
+```
+
+**Verify — Flow A has exactly 1 execution for this order:**
+```javascript
+db.crm_flow_executions.find({ flowId: ObjectId('FLOW_A_ID'), 'context.orderId': 'order-runonce-001' }).count()
+// Expected: 1
+```
+
+#### Test B: runOnce=false — fires on 'confirmed', fires AGAIN on 'ready'
+
+Use a different orderId for Flow B testing. Send two status changes (confirmed, then ready).
+
+**Verify — Flow B has 2 executions (one per matching status change):**
+```javascript
+db.crm_flow_executions.find({ flowId: ObjectId('FLOW_B_ID'), 'context.orderId': 'order-runonce-002' }).count()
+// Expected: 2 (fires on each matching status change, assuming previous execution completed before the next)
+```
+
+**Note:** The `isContactEnrolled` anti-spam check may block the second enrollment if the first execution is still actively running. Wait for the first execution to complete before sending the second status change.
+
+---
+
+### 10.12 Payment Status Enforcement — Universal Guard
+
+All order-related triggers require `paymentStatus` to be `'paid'` or `'succeeded'` in the event payload. This is a universal guard at the top of `TriggerService.checkTriggerConditions()`.
+
+#### Test A: Unpaid order — no order-related triggers fire
+
+```bash
+# Order completed event with paymentStatus='pending' (NOT paid)
+echo '{"eventType":"order.status_changed","restaurantId":"YOUR_RESTAURANT_ID","payload":{"orderId":"order-unpaid-001","orderNumber":"ORD-UNPAID","customerId":"YOUR_CUSTOMER_ID","customerEmail":"test@example.com","customerName":"Test User","customerPhone":"+15551234567","orderType":"delivery","orderTotal":30.00,"paymentStatus":"pending","newStatus":"confirmed","previousStatus":"pending","status":"confirmed"}}' | kcat -b localhost:9092 -t orderchop.orders -P
+```
+
+**Expected server logs:**
+```
+[TriggerService] Skipping trigger: payment not confirmed (paymentStatus=pending)
+```
+
+**Verify — no executions created for any order-related flow:**
+```javascript
+db.crm_flow_executions.find({
+  restaurantId: ObjectId("YOUR_RESTAURANT_ID"),
+  "context.orderId": "order-unpaid-001"
+}).count()
+// Expected: 0
+```
+
+#### Test B: Paid order — triggers fire normally
+
+```bash
+# Same order, now with paymentStatus='paid'
+echo '{"eventType":"order.status_changed","restaurantId":"YOUR_RESTAURANT_ID","payload":{"orderId":"order-paid-001","orderNumber":"ORD-PAID","customerId":"YOUR_CUSTOMER_ID","customerEmail":"test@example.com","customerName":"Test User","customerPhone":"+15551234567","orderType":"delivery","orderTotal":30.00,"paymentStatus":"paid","newStatus":"confirmed","previousStatus":"pending","status":"confirmed"}}' | kcat -b localhost:9092 -t orderchop.orders -P
+```
+
+**Expected:** The payment guard passes, and any matching active flows evaluate their trigger conditions normally.
+
+#### Test C: Stripe 'succeeded' status — accepted as paid
+
+```bash
+# Payment event with paymentStatus='succeeded' (Stripe format)
+echo '{"eventType":"payment.succeeded","restaurantId":"YOUR_RESTAURANT_ID","payload":{"orderId":"order-stripe-001","orderNumber":"ORD-STRIPE","customerId":"YOUR_CUSTOMER_ID","customerEmail":"test@example.com","customerName":"Test User","orderTotal":30.00,"paymentStatus":"succeeded","paymentMethod":"card"}}' | kcat -b localhost:9092 -t orderchop.payments -P
+```
+
+**Expected:** The payment guard accepts `'succeeded'` — any matching `new_order` flows evaluate normally.
+
+#### Test D: Abandoned cart — exempt from payment guard
+
+The `abandoned_cart` trigger is exempt from the payment guard (it inherently targets unpaid orders). See section 10.7 for abandoned cart testing — the `paymentStatus` field is not checked for this trigger type.
+
+#### Test E: no_order_in_x_days — exempt from payment guard
+
+The `no_order_in_x_days` trigger is cron-based and has no order context in its payload. It is exempt from the payment guard. See the "Testing no_order_in_x_days Cron" troubleshooting section for testing instructions.
+
+---
 
 ### Running Unit Tests
 
