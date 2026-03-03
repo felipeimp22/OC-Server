@@ -11,3 +11,4 @@ export { OrderEventConsumer } from './consumers/OrderEventConsumer.js';
 export { CustomerEventConsumer } from './consumers/CustomerEventConsumer.js';
 export { CartEventConsumer, abandonedCartQueue, ABANDONED_CART_QUEUE } from './consumers/CartEventConsumer.js';
 export { CRMEventConsumer } from './consumers/CRMEventConsumer.js';
+export { PrintJobConsumer } from './consumers/PrintJobConsumer.js';

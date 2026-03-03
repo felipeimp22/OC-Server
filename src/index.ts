@@ -41,6 +41,7 @@ import {
   CustomerEventConsumer,
   CartEventConsumer,
   CRMEventConsumer,
+  PrintJobConsumer,
   abandonedCartQueue,
 } from './kafka/index.js';
 import {
@@ -179,6 +180,14 @@ async function main(): Promise<void> {
 
     consumers.push(orderConsumer, customerConsumer, cartConsumer, crmConsumer);
     log.info('Kafka consumers started');
+
+    // Start print worker consumer (separate feature flag)
+    if (env.ENABLE_PRINT_WORKER) {
+      const printJobConsumer = new PrintJobConsumer();
+      await printJobConsumer.start();
+      consumers.push(printJobConsumer);
+      log.info('Print job consumer started');
+    }
   }
 
   // 5. Start BullMQ workers and queues

@@ -19,6 +19,11 @@ export const KAFKA_TOPICS = {
 
   // ── Outgoing (produced by CRM Engine → consumed by OrderChop Next.js)
   CRM_NOTIFICATIONS: 'crm.notifications',
+
+  // ── Print System (produced & consumed within CRM Engine)
+  PRINT_JOBS: 'print.jobs',
+  PRINT_JOBS_RETRY: 'print.jobs.retry',
+  PRINT_JOBS_DEAD_LETTER: 'print.jobs.dead-letter',
 } as const;
 
 export type KafkaTopic = (typeof KAFKA_TOPICS)[keyof typeof KAFKA_TOPICS];

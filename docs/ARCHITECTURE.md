@@ -319,6 +319,27 @@ The `QueueMessage` Mongoose model (`src/domain/models/QueueMessage.ts`) stores: 
 
 The adapter is instantiated as a singleton via `QueueFactory.getQueueAdapter('mongo')`. Set `QUEUE_ADAPTER=mongo` in env to use it.
 
+### PrintJobConsumer
+
+The `PrintJobConsumer` (`src/kafka/consumers/PrintJobConsumer.ts`) subscribes to `print.jobs` and `print.jobs.retry` topics and processes print jobs:
+
+1. **Deserialize** message → load PrintJob from DB (validates status is `'queued'`)
+2. **Load Printer** config → check enabled
+3. **Generate receipt HTML** via `ReceiptFormatter` (customer receipt or kitchen ticket based on trigger type)
+4. **Send email** via `PrintDeliveryService` to the printer's device email
+5. **Update status** to `'sent'` on success
+
+**Failure handling:**
+- If `attempts < maxAttempts` and error is retryable → publish to `print.jobs.retry` with exponential backoff (5s, 15s, 45s), set status to `'failed'`
+- If `attempts >= maxAttempts` or permanent error → publish to `print.jobs.dead-letter`, set status to `'dead_letter'`
+
+**Concurrency control:**
+- **Global semaphore** per restaurant: limited by `PRINT_GLOBAL_CONCURRENCY` env var (default 2)
+- **Per-printer semaphore**: limited by `Printer.concurrency` field (default 1)
+- When all slots full, consumer pauses the Kafka partition and resumes after 2 seconds
+
+**Registration:** Guarded by `ENABLE_PRINT_WORKER` feature flag in `src/index.ts`. Consumer group: `print-worker-group`.
+
 ## Service Layer
 
 | Service | Responsibility |
