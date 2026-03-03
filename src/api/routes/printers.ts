@@ -83,6 +83,7 @@ export async function printerRoutes(app: FastifyInstance): Promise<void> {
         printDelivery: true,
         printDineIn: true,
         distributionMode: 'duplicate',
+        fontSize: 'normal',
         emailFrom: null,
       };
     }
@@ -95,6 +96,7 @@ export async function printerRoutes(app: FastifyInstance): Promise<void> {
       printDelivery: settings.printDelivery,
       printDineIn: settings.printDineIn,
       distributionMode: settings.distributionMode ?? 'duplicate',
+      fontSize: settings.fontSize ?? 'normal',
       emailFrom: settings.emailFrom ?? null,
       createdAt: settings.createdAt,
       updatedAt: settings.updatedAt,

@@ -966,6 +966,7 @@ Kitchen triggers only fire for `newStatus === 'preparing'`. The `order.status_ch
 | printDineIn | boolean | true | Print dine-in orders |
 | globalConcurrency | number | 2 | Internal: max concurrent print jobs per restaurant. Not exposed via API — set via `PRINT_GLOBAL_CONCURRENCY` env var |
 | distributionMode | 'duplicate' \| 'distribute' | 'duplicate' | How orders are sent to matching printers: duplicate = all get every order, distribute = round-robin |
+| fontSize | 'small' \| 'normal' \| 'large' | 'normal' | Receipt text size preset — passed to `ReceiptFormatter.formatCustomerReceipt()` |
 | lastDistributedIndex | Map<string, number> | {} | Internal: round-robin position per order type key (e.g., `{ 'pickup': 1, 'kitchen_pickup': 2 }`) |
 | emailFrom | string | — | Custom from address for print emails |
 
@@ -1160,7 +1161,7 @@ Types are in `oc-restaurant-manager/types/printer.ts`.
 
 The printer settings page (`components/settings/printer/PrinterSettings.tsx`) provides:
 
-- **Global Settings**: enable/disable toggle, auto-print toggle, order type checkboxes, distribution mode selector (radio group: "Print on all matching printers" / "Distribute orders across printers")
+- **Global Settings**: enable/disable toggle, auto-print toggle, order type checkboxes, distribution mode selector (radio group: "Print on all matching printers" / "Distribute orders across printers"), font size selector (small / normal / large)
 - **Printer Management**: list of registered printers with test/edit/delete actions
   - Each printer card shows order types as colored badges: Pickup (blue/info), Delivery (green/success), Dine-In (orange/warning)
   - When 2+ printers share an order type, a distribution indicator appears on the shared badge: "(copies to all)" in duplicate mode, "(round-robin)" in distribute mode

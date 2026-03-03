@@ -39,6 +39,8 @@ export interface IPrinterSettingsDocument extends Document {
    * Only used when distributionMode is 'distribute'.
    */
   lastDistributedIndex: Map<string, number>;
+  /** Receipt font size preset */
+  fontSize: 'small' | 'normal' | 'large';
   /** Custom "from" email for print emails (overrides default) */
   emailFrom?: string;
   createdAt: Date;
@@ -63,6 +65,11 @@ const PrinterSettingsSchema = new Schema<IPrinterSettingsDocument>(
       type: Map,
       of: Number,
       default: {},
+    },
+    fontSize: {
+      type: String,
+      enum: ['small', 'normal', 'large'],
+      default: 'normal',
     },
     emailFrom: { type: String },
   },

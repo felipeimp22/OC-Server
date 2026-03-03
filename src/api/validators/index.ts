@@ -123,6 +123,7 @@ export const updatePrinterSettingsBody = z.object({
   printDelivery: z.boolean().optional(),
   printDineIn: z.boolean().optional(),
   distributionMode: z.enum(['duplicate', 'distribute']).optional(),
+  fontSize: z.enum(['small', 'normal', 'large']).optional(),
   emailFrom: z.string().email().optional().nullable(),
 });
 

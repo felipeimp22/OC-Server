@@ -27,8 +27,9 @@ import { createLogger } from '../../config/logger.js';
 import { KAFKA_TOPICS } from '../topics.js';
 import { PrintJobRepository } from '../../repositories/PrintJobRepository.js';
 import { PrinterRepository } from '../../repositories/PrinterRepository.js';
+import { PrinterSettingsRepository } from '../../repositories/PrinterSettingsRepository.js';
 import { PrintDeliveryService } from '../../services/PrintDeliveryService.js';
-import { ReceiptFormatter } from '../../services/ReceiptFormatter.js';
+import { ReceiptFormatter, type FontSizePreset } from '../../services/ReceiptFormatter.js';
 import { Order } from '../../domain/models/external/Order.js';
 import { Restaurant } from '../../domain/models/external/Restaurant.js';
 import { timezoneService } from '../../services/TimezoneService.js';
@@ -66,6 +67,7 @@ export class PrintJobConsumer {
   private consumer: Consumer | null = null;
   private readonly printJobRepo: PrintJobRepository;
   private readonly printerRepo: PrinterRepository;
+  private readonly settingsRepo: PrinterSettingsRepository;
   private readonly deliveryService: PrintDeliveryService;
   private readonly receiptFormatter: ReceiptFormatter;
 
@@ -77,6 +79,7 @@ export class PrintJobConsumer {
   constructor() {
     this.printJobRepo = new PrintJobRepository();
     this.printerRepo = new PrinterRepository();
+    this.settingsRepo = new PrinterSettingsRepository();
     this.deliveryService = new PrintDeliveryService();
     this.receiptFormatter = new ReceiptFormatter();
   }
@@ -231,7 +234,10 @@ export class PrintJobConsumer {
         if (printJob.trigger === 'kitchen') {
           receiptHtml = this.receiptFormatter.formatKitchenTicket(order, restaurant, timezone);
         } else {
-          receiptHtml = this.receiptFormatter.formatCustomerReceipt(order, restaurant, timezone);
+          // Load printer settings to get fontSize preference
+          const settings = await this.settingsRepo.findByRestaurant(restaurantId);
+          const fontSize: FontSizePreset = settings?.fontSize ?? 'normal';
+          receiptHtml = this.receiptFormatter.formatCustomerReceipt(order, restaurant, timezone, fontSize);
         }
       }
 
