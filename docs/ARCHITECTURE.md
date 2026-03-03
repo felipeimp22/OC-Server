@@ -334,6 +334,7 @@ The adapter is instantiated as a singleton via `QueueFactory.getQueueAdapter('mo
 | TimerService | Timer scheduling via BullMQ (delay + date_field subtypes) |
 | WebhookService | Outgoing webhook execution with variable interpolation |
 | ReceiptFormatter | HTML receipt generation for thermal printers (customer receipts + kitchen tickets) |
+| PrintDeliveryService | Sends HTML receipt emails to Star Micronics printer device emails via Mailgun. Classifies errors as retryable (5xx/network) vs permanent (4xx). Supports test prints. |
 | InactivityChecker | Daily cron (0 8 * * *) for no_order_in_x_days enrollment |
 
 ## Order-Level Deduplication

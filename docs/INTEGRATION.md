@@ -305,6 +305,39 @@ When an email action executes, `ActionService.executeSendEmail()` resolves recip
 
 ---
 
+## Print Delivery (Email-Based Printing)
+
+The `PrintDeliveryService` sends HTML receipt emails to Star Micronics printer device emails via the existing Mailgun provider.
+
+### How It Works
+
+1. Restaurant owner registers their Star Micronics printer's device email in settings
+2. When a print job is processed, `PrintDeliveryService.sendPrintJob()` sends the receipt HTML to the printer's email
+3. The Star Micronics printer receives the email and renders the HTML on thermal paper
+
+### From Address Resolution
+
+The "from" address for print emails follows this priority:
+1. `PrinterSettings.emailFrom` (per-restaurant custom sender)
+2. `PRINT_EMAIL_FROM` env var (system-wide print email sender)
+3. `EMAIL_FROM_ADDRESS` env var (general system email sender)
+4. Fallback: `noreply@{EMAIL_DOMAIN}`
+
+### Error Classification
+
+| Error Type | Examples | Retryable? |
+|-----------|---------|------------|
+| Network errors | ECONNABORTED, ETIMEDOUT, ECONNREFUSED | Yes |
+| Server errors | HTTP 500, 502, 503 | Yes |
+| Client errors | HTTP 400, 401, 403, 422 | No (permanent) |
+| Unknown errors | — | Yes (safe default) |
+
+### Test Print
+
+`PrintDeliveryService.sendTestPrint(printer, restaurantName)` sends a sample receipt with dummy order data to verify the printer receives and renders HTML correctly.
+
+---
+
 ## Docker Deployment
 
 ```bash

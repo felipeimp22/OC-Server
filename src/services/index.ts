@@ -20,3 +20,4 @@ export { AnalyticsService, type DashboardOverview } from './AnalyticsService.js'
 export { WebhookService } from './WebhookService.js';
 export { timezoneService } from './TimezoneService.js';
 export { ReceiptFormatter } from './ReceiptFormatter.js';
+export { PrintDeliveryService, type PrintDeliveryResult } from './PrintDeliveryService.js';
