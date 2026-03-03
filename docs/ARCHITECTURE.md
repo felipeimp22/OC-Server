@@ -333,6 +333,7 @@ The adapter is instantiated as a singleton via `QueueFactory.getQueueAdapter('mo
 | AnalyticsService | Dashboard stats and flow metrics |
 | TimerService | Timer scheduling via BullMQ (delay + date_field subtypes) |
 | WebhookService | Outgoing webhook execution with variable interpolation |
+| ReceiptFormatter | HTML receipt generation for thermal printers (customer receipts + kitchen tickets) |
 | InactivityChecker | Daily cron (0 8 * * *) for no_order_in_x_days enrollment |
 
 ## Order-Level Deduplication
