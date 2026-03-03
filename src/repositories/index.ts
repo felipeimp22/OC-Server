@@ -19,3 +19,6 @@ export { TaskRepository } from './TaskRepository.js';
 export { LinkTrackingRepository } from './LinkTrackingRepository.js';
 export { ProcessedEventRepository } from './ProcessedEventRepository.js';
 export { TriggerAchievementRepository } from './TriggerAchievementRepository.js';
+export { PrinterRepository } from './PrinterRepository.js';
+export { PrintJobRepository } from './PrintJobRepository.js';
+export { PrinterSettingsRepository } from './PrinterSettingsRepository.js';

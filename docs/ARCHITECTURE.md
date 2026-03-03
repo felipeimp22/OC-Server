@@ -125,6 +125,14 @@ Prefixed with `crm_` to avoid collisions:
 - `crm_link_tracking`, `crm_review_requests`
 - `crm_campaigns`, `crm_tasks`, `crm_processed_events`
 
+### Print System Collections
+- `printers` — registered Star Micronics printer devices per restaurant (name, device email, type, orderTypes, concurrency). Unique compound index on `(restaurantId, email)`.
+- `print_jobs` — individual print job lifecycle tracking (pending → queued → sending → sent / failed → dead_letter). Indexed on `(restaurantId, status)`, `(printerId, status)`, and `orderId`.
+- `printer_settings` — per-restaurant global print config (auto-print toggles, order type filters, concurrency limits). One doc per restaurant (unique `restaurantId`).
+
+### Infrastructure Collections
+- `queue_messages` — MongoDB-backed message queue for environments without Kafka (dev/test fallback)
+
 ## Frontend Integration — Node Format
 
 The React Flow canvas (in `oc-restaurant-manager`) uses a different node representation than the `IFlowNode` interface stored in MongoDB.
