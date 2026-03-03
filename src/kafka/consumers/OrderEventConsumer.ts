@@ -7,15 +7,21 @@
  */
 
 import type { EachMessagePayload } from 'kafkajs';
-import { createConsumer } from '../../config/kafka.js';
+import { createConsumer, getProducer } from '../../config/kafka.js';
 import { env } from '../../config/env.js';
 import { KAFKA_TOPICS } from '../topics.js';
 import { ContactService } from '../../services/ContactService.js';
 import { TriggerService } from '../../services/TriggerService.js';
 import { FlowRepository } from '../../repositories/FlowRepository.js';
+import { PrinterSettingsRepository } from '../../repositories/PrinterSettingsRepository.js';
+import { PrinterRepository } from '../../repositories/PrinterRepository.js';
+import { PrintJobRepository } from '../../repositories/PrintJobRepository.js';
+import { ReceiptFormatter } from '../../services/ReceiptFormatter.js';
+import { timezoneService } from '../../services/TimezoneService.js';
 import { abandonedCartQueue } from './CartEventConsumer.js';
 import { tryProcessEvent } from '../../utils/idempotency.js';
 import { Order } from '../../domain/models/external/Order.js';
+import { Restaurant } from '../../domain/models/external/Restaurant.js';
 import { createLogger } from '../../config/logger.js';
 
 const log = createLogger('OrderEventConsumer');
@@ -28,16 +34,32 @@ const log = createLogger('OrderEventConsumer');
  */
 const ORDER_COMPLETED_QUALIFYING_STATUSES = ['ready', 'out_for_delivery', 'delivered', 'completed'];
 
+/** Map Order.orderType values to PrinterSettings toggle keys and Printer.orderTypes values */
+const ORDER_TYPE_TO_PRINT_SETTING: Record<string, { settingKey: 'printPickup' | 'printDelivery' | 'printDineIn'; printerOrderType: string }> = {
+  pickup: { settingKey: 'printPickup', printerOrderType: 'pickup' },
+  delivery: { settingKey: 'printDelivery', printerOrderType: 'delivery' },
+  dine_in: { settingKey: 'printDineIn', printerOrderType: 'dineIn' },
+  dineIn: { settingKey: 'printDineIn', printerOrderType: 'dineIn' },
+};
+
 export class OrderEventConsumer {
   private consumer: ReturnType<typeof createConsumer> | null = null;
   private readonly contactService: ContactService;
   private readonly triggerService: TriggerService;
   private readonly flowRepo: FlowRepository;
+  private readonly printerSettingsRepo: PrinterSettingsRepository;
+  private readonly printerRepo: PrinterRepository;
+  private readonly printJobRepo: PrintJobRepository;
+  private readonly receiptFormatter: ReceiptFormatter;
 
   constructor() {
     this.contactService = new ContactService();
     this.triggerService = new TriggerService();
     this.flowRepo = new FlowRepository();
+    this.printerSettingsRepo = new PrinterSettingsRepository();
+    this.printerRepo = new PrinterRepository();
+    this.printJobRepo = new PrintJobRepository();
+    this.receiptFormatter = new ReceiptFormatter();
   }
 
   async start(): Promise<void> {
@@ -251,6 +273,11 @@ export class OrderEventConsumer {
       });
     }
 
+    // Auto-print: trigger receipt printing for matching printers
+    if (orderId) {
+      await this.triggerAutoPrint(restaurantId, orderId, triggerContext.orderType);
+    }
+
     // Cancel pending abandoned cart jobs for this order
     if (orderId) {
       await this.cancelAbandonedCartJobs(restaurantId, orderId);
@@ -400,6 +427,126 @@ export class OrderEventConsumer {
     if (!contact) return;
 
     await this.triggerService.evaluateTriggers(restaurantId, eventType, contact._id.toString(), payload);
+  }
+
+  /**
+   * Auto-print: create print jobs for matching receipt printers and publish to Kafka.
+   *
+   * Called after order completion. Checks PrinterSettings (enabled + autoPrint + order type toggle),
+   * finds enabled receipt printers matching the order type, creates a PrintJob per printer,
+   * formats the receipt HTML, and publishes to the print.jobs Kafka topic.
+   *
+   * Failures here do NOT affect the order flow — printing is best-effort.
+   */
+  private async triggerAutoPrint(
+    restaurantId: string,
+    orderId: string,
+    orderType?: string,
+  ): Promise<void> {
+    try {
+      // 1. Load PrinterSettings — skip silently if not configured
+      const settings = await this.printerSettingsRepo.findByRestaurant(restaurantId);
+      if (!settings || !settings.enabled || !settings.autoPrint) {
+        log.debug({ restaurantId }, 'Auto-print skipped — printing not enabled or autoPrint off');
+        return;
+      }
+
+      // 2. Check order type against print settings
+      const typeMapping = orderType ? ORDER_TYPE_TO_PRINT_SETTING[orderType] : undefined;
+      if (!typeMapping) {
+        log.info({ restaurantId, orderType }, 'Auto-print skipped — unknown order type');
+        return;
+      }
+      if (!settings[typeMapping.settingKey]) {
+        log.debug({ restaurantId, orderType, settingKey: typeMapping.settingKey }, 'Auto-print skipped — order type not enabled in print settings');
+        return;
+      }
+
+      // 3. Find enabled receipt printers matching the order type
+      const printers = await this.printerRepo.findEnabledByRestaurantAndOrderType(
+        restaurantId,
+        typeMapping.printerOrderType,
+      );
+      // Filter to receipt-type printers only (kitchen printers handled separately in US-012)
+      const receiptPrinters = printers.filter((p) => p.type === 'receipt');
+      if (receiptPrinters.length === 0) {
+        log.info({ restaurantId, orderType }, 'Auto-print skipped — no enabled receipt printers for order type');
+        return;
+      }
+
+      // 4. Load order and restaurant data for receipt formatting
+      const [orderDoc, restaurantDoc] = await Promise.all([
+        Order.findById(orderId).lean().exec(),
+        Restaurant.findById(restaurantId).lean().exec(),
+      ]);
+      if (!orderDoc) {
+        log.warn({ restaurantId, orderId }, 'Auto-print skipped — order not found in DB');
+        return;
+      }
+      if (!restaurantDoc) {
+        log.warn({ restaurantId, orderId }, 'Auto-print skipped — restaurant not found in DB');
+        return;
+      }
+
+      // 5. Resolve timezone for receipt timestamps
+      const timezone = await timezoneService.getTimezone(restaurantId);
+
+      // 6. Format receipt HTML
+      const receiptHtml = this.receiptFormatter.formatCustomerReceipt(
+        orderDoc as any,
+        restaurantDoc as any,
+        timezone,
+      );
+
+      // 7. For each matching printer: create PrintJob → publish to Kafka
+      const producer = getProducer();
+      for (const printer of receiptPrinters) {
+        const printerId = printer._id.toString();
+        try {
+          // Create PrintJob with status 'queued'
+          const printJob = await this.printJobRepo.create({
+            restaurantId: printer.restaurantId,
+            printerId: printer._id,
+            orderId: orderDoc._id,
+            status: 'queued',
+            trigger: 'auto',
+            attempts: 0,
+            maxAttempts: env.PRINT_MAX_RETRIES ?? 3,
+            receiptHtml,
+            timezone,
+            scheduledAt: new Date(),
+          } as any);
+
+          // Publish to print.jobs topic
+          await producer.send({
+            topic: KAFKA_TOPICS.PRINT_JOBS,
+            messages: [
+              {
+                key: restaurantId,
+                value: JSON.stringify({
+                  printJobId: printJob._id.toString(),
+                  restaurantId,
+                  printerId,
+                  orderId,
+                  trigger: 'auto',
+                }),
+              },
+            ],
+          });
+
+          log.info(
+            { restaurantId, orderId, printerId, printJobId: printJob._id.toString() },
+            'Auto-print job created and published',
+          );
+        } catch (printerErr) {
+          // Individual printer failure — continue with other printers
+          log.error({ err: printerErr, restaurantId, orderId, printerId }, 'Failed to create auto-print job for printer');
+        }
+      }
+    } catch (err) {
+      // Non-critical: auto-print failure must never block the order flow
+      log.error({ err, restaurantId, orderId }, 'Auto-print trigger failed — order flow continues');
+    }
   }
 
   /**

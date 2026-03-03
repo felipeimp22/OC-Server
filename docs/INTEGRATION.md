@@ -336,6 +336,39 @@ The "from" address for print emails follows this priority:
 
 `PrintDeliveryService.sendTestPrint(printer, restaurantName)` sends a sample receipt with dummy order data to verify the printer receives and renders HTML correctly.
 
+### Auto-Print Event Flow
+
+When an order is completed (qualifying fulfillment status or explicit `order.completed` event), the `OrderEventConsumer` automatically creates print jobs for matching receipt printers:
+
+```
+order.completed / order.status_changed → 'ready'|'out_for_delivery'|'delivered'|'completed'
+  → OrderEventConsumer.processOrderAsCompleted()
+    → triggerAutoPrint(restaurantId, orderId, orderType)
+      1. PrinterSettings check: enabled=true AND autoPrint=true
+      2. Order type check: orderType maps to print settings toggle
+         - 'pickup' → printPickup
+         - 'delivery' → printDelivery
+         - 'dine_in'/'dineIn' → printDineIn
+      3. Find enabled receipt printers (type='receipt') matching order type
+      4. For each printer:
+         - Create PrintJob (status='queued', trigger='auto')
+         - Publish to print.jobs Kafka topic
+         → PrintJobConsumer picks up the job → formats receipt → sends email to printer
+```
+
+**Print job Kafka message payload:**
+```json
+{
+  "printJobId": "67abc123...",
+  "restaurantId": "67abc456...",
+  "printerId": "67abc789...",
+  "orderId": "67abcdef...",
+  "trigger": "auto"
+}
+```
+
+**Idempotency:** Auto-print runs inside `processOrderAsCompleted()` which is guarded by `tryProcessEvent('order_completed_process:${orderId}')`. This prevents duplicate print jobs when both `order.completed` and `order.status_changed` fire for the same order.
+
 ---
 
 ## Printer REST API

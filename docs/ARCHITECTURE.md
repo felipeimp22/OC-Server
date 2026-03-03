@@ -351,6 +351,30 @@ The `PrintDeadLetterConsumer` (`src/kafka/consumers/PrintDeadLetterConsumer.ts`)
 
 **Registration:** Guarded by `ENABLE_PRINT_WORKER` feature flag in `src/index.ts`. Consumer group: `print-dead-letter-group`.
 
+### Auto-Print Trigger (OrderEventConsumer)
+
+When an order is completed (via `processOrderAsCompleted()`), the `OrderEventConsumer` triggers automatic receipt printing alongside the existing CRM trigger evaluation:
+
+```
+order.completed / order.status_changed (qualifying status)
+  → processOrderAsCompleted()
+    → triggerAutoPrint(restaurantId, orderId, orderType)
+      1. Load PrinterSettings → check enabled + autoPrint
+      2. Map orderType to print settings toggle (pickup→printPickup, delivery→printDelivery, dine_in/dineIn→printDineIn)
+      3. Find enabled receipt printers matching order type (type='receipt' only, kitchen printers excluded)
+      4. Load Order + Restaurant from DB for receipt formatting
+      5. Resolve timezone via TimezoneService
+      6. Format receipt HTML via ReceiptFormatter.formatCustomerReceipt()
+      7. For each printer: create PrintJob (status='queued', trigger='auto') → publish to print.jobs topic
+```
+
+**Key design decisions:**
+- Auto-print runs inside `processOrderAsCompleted()` which has idempotency via `tryProcessEvent('order_completed_process:${orderId}')` — ensures print jobs are created exactly once per order even when both `order.completed` and `order.status_changed` fire.
+- Receipt printers only (`type='receipt'`). Kitchen printers (`type='kitchen'`) are triggered separately on status→preparing.
+- Order type mapping handles both `dine_in` (Order model) and `dineIn` (Printer.orderTypes) formats.
+- Failures are caught and logged but never block the order flow.
+- If PrinterSettings doesn't exist or is disabled, auto-print is silently skipped.
+
 ### Printer REST API
 
 The printer API (`src/api/routes/printers.ts`) is registered at `/api/v1/printers`. All endpoints require auth (JWT + X-Restaurant-Id) via the global preHandler middleware.
