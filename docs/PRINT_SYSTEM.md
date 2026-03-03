@@ -219,7 +219,7 @@ The system enforces two levels of concurrency to prevent overwhelming printers:
 
 ### Global Concurrency (per restaurant)
 
-- Controlled by `PrinterSettings.globalConcurrency` (default: 2)
+- Controlled by `PrinterSettings.globalConcurrency` (default: 2) — internal, not user-configurable via API
 - In-memory semaphore keyed by restaurantId
 - Limits total parallel print jobs across all printers for one restaurant
 - Falls back to `PRINT_GLOBAL_CONCURRENCY` env var
@@ -413,7 +413,9 @@ Kitchen triggers only fire for `newStatus === 'preparing'`. The `order.status_ch
 | printPickup | boolean | true | Print pickup orders |
 | printDelivery | boolean | true | Print delivery orders |
 | printDineIn | boolean | true | Print dine-in orders |
-| globalConcurrency | number | 2 | Max concurrent print jobs per restaurant |
+| globalConcurrency | number | 2 | Max concurrent print jobs per restaurant (internal — not exposed via API) |
+| distributionMode | 'duplicate' \| 'distribute' | 'duplicate' | How orders are sent to matching printers: duplicate = all get every order, distribute = round-robin |
+| lastDistributedIndex | Map<string, number> | {} | Round-robin position per order type key (e.g., { 'pickup': 1, 'kitchen_pickup': 2 }) |
 | emailFrom | string | — | Custom from address for print emails |
 
 ### QueueMessage (`src/domain/models/QueueMessage.ts`)

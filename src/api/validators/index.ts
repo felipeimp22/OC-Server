@@ -122,7 +122,7 @@ export const updatePrinterSettingsBody = z.object({
   printPickup: z.boolean().optional(),
   printDelivery: z.boolean().optional(),
   printDineIn: z.boolean().optional(),
-  globalConcurrency: z.coerce.number().int().min(1).max(5).optional(),
+  distributionMode: z.enum(['duplicate', 'distribute']).optional(),
   emailFrom: z.string().email().optional().nullable(),
 });
 

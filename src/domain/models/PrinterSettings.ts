@@ -26,8 +26,19 @@ export interface IPrinterSettingsDocument extends Document {
   printDelivery: boolean;
   /** Print dine-in orders */
   printDineIn: boolean;
-  /** Max concurrent print jobs across all printers */
+  /** Max concurrent print jobs across all printers (internal — not user-configurable via API) */
   globalConcurrency: number;
+  /**
+   * How orders are distributed when multiple printers match:
+   * - 'duplicate': every matching printer gets every order (default)
+   * - 'distribute': orders round-robin across matching printers
+   */
+  distributionMode: 'duplicate' | 'distribute';
+  /**
+   * Round-robin position per order type key (e.g., { 'pickup': 1, 'delivery': 0, 'kitchen_pickup': 2 }).
+   * Only used when distributionMode is 'distribute'.
+   */
+  lastDistributedIndex: Map<string, number>;
   /** Custom "from" email for print emails (overrides default) */
   emailFrom?: string;
   createdAt: Date;
@@ -43,6 +54,16 @@ const PrinterSettingsSchema = new Schema<IPrinterSettingsDocument>(
     printDelivery: { type: Boolean, default: true },
     printDineIn: { type: Boolean, default: true },
     globalConcurrency: { type: Number, default: 2 },
+    distributionMode: {
+      type: String,
+      enum: ['duplicate', 'distribute'],
+      default: 'duplicate',
+    },
+    lastDistributedIndex: {
+      type: Map,
+      of: Number,
+      default: {},
+    },
     emailFrom: { type: String },
   },
   {

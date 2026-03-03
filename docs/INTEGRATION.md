@@ -442,7 +442,7 @@ GET /api/v1/printers/settings
 PUT /api/v1/printers/settings
 Body: { enabled?: boolean, autoPrint?: boolean, printPickup?: boolean,
         printDelivery?: boolean, printDineIn?: boolean,
-        globalConcurrency?: number(1-5), emailFrom?: string|null }
+        distributionMode?: 'duplicate'|'distribute', emailFrom?: string|null }
 ```
 
 ### Print Jobs

@@ -82,11 +82,23 @@ export async function printerRoutes(app: FastifyInstance): Promise<void> {
         printPickup: true,
         printDelivery: true,
         printDineIn: true,
-        globalConcurrency: 2,
+        distributionMode: 'duplicate',
         emailFrom: null,
       };
     }
-    return settings;
+    return {
+      _id: settings._id,
+      restaurantId: settings.restaurantId,
+      enabled: settings.enabled,
+      autoPrint: settings.autoPrint,
+      printPickup: settings.printPickup,
+      printDelivery: settings.printDelivery,
+      printDineIn: settings.printDineIn,
+      distributionMode: settings.distributionMode ?? 'duplicate',
+      emailFrom: settings.emailFrom ?? null,
+      createdAt: settings.createdAt,
+      updatedAt: settings.updatedAt,
+    };
   });
 
   // PUT /api/v1/printers/settings — Update printer settings
