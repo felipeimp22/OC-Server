@@ -127,6 +127,12 @@ export const updatePrinterSettingsBody = z.object({
   emailFrom: z.string().email().optional().nullable(),
 });
 
+export const previewReceiptBody = z.object({
+  itemCount: z.coerce.number().int().min(1).max(20).default(3),
+  orderType: z.enum(['pickup', 'delivery', 'dine_in']).default('pickup'),
+  fontSize: z.enum(['small', 'normal', 'large']).default('normal'),
+});
+
 export const printJobFiltersQuery = paginationQuery.extend({
   status: z.enum(['pending', 'queued', 'sending', 'sent', 'failed', 'dead_letter']).optional(),
   printerId: z.string().optional(),

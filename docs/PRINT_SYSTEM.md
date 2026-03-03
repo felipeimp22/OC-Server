@@ -823,6 +823,29 @@ Content:
 - User-provided content escaped via `escapeHtml()` to prevent injection
 - Dynamic content stripped of HTML tags via `stripHtmlTags()` regex sanitizer
 
+### Receipt Preview API
+
+**Endpoint:** `POST /api/v1/printers/preview` (authenticated, restaurant-scoped)
+
+Generates a receipt preview using a sample order and the restaurant's real name/address/phone.
+
+**Request body:**
+```json
+{
+  "itemCount": 3,        // 1-20, default 3
+  "orderType": "pickup", // "pickup" | "delivery" | "dine_in", default "pickup"
+  "fontSize": "normal"   // "small" | "normal" | "large", default "normal"
+}
+```
+
+**Response:** `{ "html": "<html>...</html>" }`
+
+**Sample order generator** (`generateSampleOrder(options)` in ReceiptFormatter.ts):
+- Deterministic item selection from a fixed pool of 15 menu items — same `itemCount` always produces the same items
+- Items at even indexes get modifiers; item at index 1 gets special instructions
+- Calculates subtotal, tax (7%), processing fee (2.9% + 30¢), delivery fee ($4.99 for delivery orders), and 18% tip
+- Uses the real restaurant data from DB for restaurant name/address; resolves timezone from store_hours
+
 ## Email-Based Print Delivery
 
 **File:** `src/services/PrintDeliveryService.ts`

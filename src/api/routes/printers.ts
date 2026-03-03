@@ -13,7 +13,8 @@ import { PrinterRepository } from '../../repositories/PrinterRepository.js';
 import { PrintJobRepository } from '../../repositories/PrintJobRepository.js';
 import { PrinterSettingsRepository } from '../../repositories/PrinterSettingsRepository.js';
 import { PrintDeliveryService } from '../../services/PrintDeliveryService.js';
-import { ReceiptFormatter } from '../../services/ReceiptFormatter.js';
+import { ReceiptFormatter, generateSampleOrder } from '../../services/ReceiptFormatter.js';
+import type { FontSizePreset } from '../../services/ReceiptFormatter.js';
 import { timezoneService } from '../../services/TimezoneService.js';
 import { Order } from '../../domain/models/external/Order.js';
 import { Restaurant } from '../../domain/models/external/Restaurant.js';
@@ -24,6 +25,7 @@ import {
   createPrinterBody,
   updatePrinterBody,
   updatePrinterSettingsBody,
+  previewReceiptBody,
   printJobFiltersQuery,
 } from '../validators/index.js';
 
@@ -108,6 +110,35 @@ export async function printerRoutes(app: FastifyInstance): Promise<void> {
     const body = updatePrinterSettingsBody.parse(request.body);
     const settings = await settingsRepo.upsert(request.restaurantId, body as any);
     return settings;
+  });
+
+  // ── Receipt Preview ──
+
+  // POST /api/v1/printers/preview — Generate receipt preview HTML with sample order
+  app.post('/preview', async (request: FastifyRequest, reply: FastifyReply) => {
+    const body = previewReceiptBody.parse(request.body);
+
+    const restaurant = await Restaurant.findById(request.restaurantId).lean().exec();
+    if (!restaurant) {
+      return reply.code(404).send({ error: 'Restaurant not found' });
+    }
+
+    const timezone = await timezoneService.getTimezone(request.restaurantId);
+
+    const sampleOrder = generateSampleOrder({
+      itemCount: body.itemCount,
+      orderType: body.orderType,
+      includeModifiers: true,
+    });
+
+    const html = receiptFormatter.formatCustomerReceipt(
+      sampleOrder as any,
+      restaurant as any,
+      timezone,
+      body.fontSize as FontSizePreset,
+    );
+
+    return { html };
   });
 
   // ── Print Jobs ──

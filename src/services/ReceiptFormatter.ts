@@ -412,3 +412,149 @@ function escapeHtml(str: string | undefined | null): string {
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;');
 }
+
+// ── Sample Order Generator ──
+
+/** Options for generating a sample order */
+export interface SampleOrderOptions {
+  itemCount: number;
+  orderType: 'pickup' | 'delivery' | 'dine_in';
+  includeModifiers?: boolean;
+}
+
+/** Menu item in the sample data pool */
+interface SampleMenuItem {
+  name: string;
+  price: number; // cents
+}
+
+/** Sample modifier definition */
+interface SampleModifier {
+  name: string;
+  choice: string;
+  priceAdjustment: number; // cents
+}
+
+/** Pool of realistic menu items (prices in cents) */
+const SAMPLE_MENU_ITEMS: SampleMenuItem[] = [
+  { name: 'Cavatelli & Broccoli', price: 1275 },
+  { name: 'Parmigiana Sub - Whole', price: 1425 },
+  { name: 'Margherita Pizza', price: 1650 },
+  { name: 'Caesar Salad', price: 995 },
+  { name: 'Chicken Alfredo', price: 1595 },
+  { name: 'Mozzarella Sticks', price: 895 },
+  { name: 'Grilled Salmon', price: 2195 },
+  { name: 'Spaghetti & Meatballs', price: 1495 },
+  { name: 'BBQ Chicken Wings (12pc)', price: 1395 },
+  { name: 'Garlic Bread', price: 595 },
+  { name: 'Mushroom Risotto', price: 1795 },
+  { name: 'Turkey Club Sandwich', price: 1295 },
+  { name: 'French Onion Soup', price: 895 },
+  { name: 'Tiramisu', price: 895 },
+  { name: 'Lemonade', price: 395 },
+];
+
+/** Pool of realistic modifiers */
+const SAMPLE_MODIFIERS: SampleModifier[] = [
+  { name: 'Size', choice: 'Whole', priceAdjustment: 0 },
+  { name: 'Protein', choice: 'Chicken', priceAdjustment: 300 },
+  { name: 'Side', choice: 'Fries', priceAdjustment: 250 },
+  { name: 'Dressing', choice: 'Ranch', priceAdjustment: 0 },
+  { name: 'Extra Cheese', choice: 'Yes', priceAdjustment: 150 },
+  { name: 'Spice Level', choice: 'Medium', priceAdjustment: 0 },
+  { name: 'Add Bacon', choice: 'Yes', priceAdjustment: 200 },
+];
+
+/**
+ * Generate a deterministic sample order for receipt preview.
+ *
+ * Item selection is based on `itemCount` — same count always produces the same items.
+ * Returns a plain object matching the shape `formatCustomerReceipt` expects from IOrderDocument.
+ */
+export function generateSampleOrder(options: SampleOrderOptions): Record<string, unknown> {
+  const { itemCount, orderType, includeModifiers = true } = options;
+  const clampedCount = Math.max(1, Math.min(itemCount, SAMPLE_MENU_ITEMS.length));
+
+  // Deterministic item selection: pick first N items from pool
+  const items: Array<{
+    menuItemId: null;
+    name: string;
+    price: number;
+    quantity: number;
+    options: Array<{ name: string; choice: string; priceAdjustment: number; quantity: number }>;
+    specialInstructions?: string;
+  }> = [];
+
+  let subtotal = 0;
+
+  for (let i = 0; i < clampedCount; i++) {
+    const menuItem = SAMPLE_MENU_ITEMS[i];
+    // Deterministic quantity: items at even indexes get qty 2, odd get qty 1
+    const quantity = i % 3 === 0 && i > 0 ? 2 : 1;
+
+    const itemOptions: Array<{ name: string; choice: string; priceAdjustment: number; quantity: number }> = [];
+
+    // Add modifiers deterministically: items at indexes 0, 2, 4... get a modifier
+    if (includeModifiers && i % 2 === 0 && i < SAMPLE_MODIFIERS.length) {
+      const mod = SAMPLE_MODIFIERS[i % SAMPLE_MODIFIERS.length];
+      itemOptions.push({
+        name: mod.name,
+        choice: mod.choice,
+        priceAdjustment: mod.priceAdjustment,
+        quantity: 1,
+      });
+      subtotal += mod.priceAdjustment * quantity;
+    }
+
+    // Add special instructions to item at index 1
+    const specialInstructions = i === 1 ? 'No onions please' : undefined;
+
+    subtotal += menuItem.price * quantity;
+
+    items.push({
+      menuItemId: null,
+      name: menuItem.name,
+      price: menuItem.price,
+      quantity,
+      options: itemOptions,
+      ...(specialInstructions ? { specialInstructions } : {}),
+    });
+  }
+
+  // Calculate fees (all in cents)
+  const tax = Math.round(subtotal * 0.07);
+  const processingFee = Math.round(subtotal * 0.029) + 30;
+  const deliveryFee = orderType === 'delivery' ? 499 : 0;
+  const platformFee = 0;
+  const tip = Math.round(subtotal * 0.18); // 18% tip
+  const total = subtotal + tax + processingFee + deliveryFee + platformFee + tip;
+
+  return {
+    _id: 'preview-order',
+    orderNumber: 'PREVIEW-1234',
+    customerId: null,
+    customerName: 'Jane Smith',
+    customerEmail: 'jane.smith@example.com',
+    customerPhone: '(555) 867-5309',
+    customerAddress:
+      orderType === 'delivery'
+        ? { street: '742 Evergreen Terrace', city: 'Springfield', state: 'IL', zip: '62704' }
+        : null,
+    items,
+    orderType,
+    status: 'completed',
+    paymentStatus: 'paid',
+    paymentMethod: 'stripe',
+    subtotal,
+    tax,
+    tip,
+    driverTip: 0,
+    deliveryFee,
+    platformFee,
+    processingFee,
+    total,
+    createdAt: new Date(),
+    updatedAt: new Date(),
+    currencySymbol: '$',
+  };
+}
