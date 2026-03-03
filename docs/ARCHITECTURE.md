@@ -340,6 +340,17 @@ The `PrintJobConsumer` (`src/kafka/consumers/PrintJobConsumer.ts`) subscribes to
 
 **Registration:** Guarded by `ENABLE_PRINT_WORKER` feature flag in `src/index.ts`. Consumer group: `print-worker-group`.
 
+### PrintDeadLetterConsumer
+
+The `PrintDeadLetterConsumer` (`src/kafka/consumers/PrintDeadLetterConsumer.ts`) subscribes to `print.jobs.dead-letter` and handles permanently failed print jobs:
+
+1. **Deserialize** message → extract `printJobId`, `restaurantId`, `printerId`, `orderId` from payload
+2. **Read headers** → `final-error` (error message) and `total-attempts` (retry count)
+3. **Load PrintJob** from DB → ensure status is `'dead_letter'` (safety net update if not already set by PrintJobConsumer)
+4. **Log error** with full context (`restaurantId`, `orderId`, `printerId`, error, attempts) for observability and alerting
+
+**Registration:** Guarded by `ENABLE_PRINT_WORKER` feature flag in `src/index.ts`. Consumer group: `print-dead-letter-group`.
+
 ## Service Layer
 
 | Service | Responsibility |

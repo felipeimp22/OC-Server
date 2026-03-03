@@ -42,6 +42,7 @@ import {
   CartEventConsumer,
   CRMEventConsumer,
   PrintJobConsumer,
+  PrintDeadLetterConsumer,
   abandonedCartQueue,
 } from './kafka/index.js';
 import {
@@ -181,12 +182,14 @@ async function main(): Promise<void> {
     consumers.push(orderConsumer, customerConsumer, cartConsumer, crmConsumer);
     log.info('Kafka consumers started');
 
-    // Start print worker consumer (separate feature flag)
+    // Start print worker consumers (separate feature flag)
     if (env.ENABLE_PRINT_WORKER) {
       const printJobConsumer = new PrintJobConsumer();
+      const printDeadLetterConsumer = new PrintDeadLetterConsumer();
       await printJobConsumer.start();
-      consumers.push(printJobConsumer);
-      log.info('Print job consumer started');
+      await printDeadLetterConsumer.start();
+      consumers.push(printJobConsumer, printDeadLetterConsumer);
+      log.info('Print job and dead-letter consumers started');
     }
   }
 
