@@ -16,6 +16,7 @@ import { FlowRepository } from '../../repositories/FlowRepository.js';
 import { PrinterSettingsRepository } from '../../repositories/PrinterSettingsRepository.js';
 import { PrinterRepository } from '../../repositories/PrinterRepository.js';
 import type { IPrinterDocument } from '../../domain/models/Printer.js';
+import type { IPrinterSettingsDocument } from '../../domain/models/PrinterSettings.js';
 import { PrintJobRepository } from '../../repositories/PrintJobRepository.js';
 import { ReceiptFormatter } from '../../services/ReceiptFormatter.js';
 import { timezoneService } from '../../services/TimezoneService.js';
@@ -477,14 +478,21 @@ export class OrderEventConsumer {
         restaurantId,
         typeMapping.printerOrderType,
       );
-      // Filter to receipt-type printers only (kitchen printers handled separately in US-012)
+      // Filter to receipt-type printers only (kitchen printers handled separately)
       const receiptPrinters = printers.filter((p) => p.type === 'receipt');
       if (receiptPrinters.length === 0) {
         log.info({ restaurantId, orderType }, 'Auto-print skipped — no enabled receipt printers for order type');
         return;
       }
 
-      // 4. Load order and restaurant data for receipt formatting
+      // 4. Apply distribution mode — duplicate sends to all, distribute picks one via round-robin
+      const selectedPrinters = await this.selectPrintersForJob(
+        receiptPrinters,
+        settings,
+        typeMapping.printerOrderType,
+      );
+
+      // 5. Load order and restaurant data for receipt formatting
       const [orderDoc, restaurantDoc] = await Promise.all([
         Order.findById(orderId).lean().exec(),
         Restaurant.findById(restaurantId).lean().exec(),
@@ -498,19 +506,19 @@ export class OrderEventConsumer {
         return;
       }
 
-      // 5. Resolve timezone for receipt timestamps
+      // 6. Resolve timezone for receipt timestamps
       const timezone = await timezoneService.getTimezone(restaurantId);
 
-      // 6. Format receipt HTML
+      // 7. Format receipt HTML
       const receiptHtml = this.receiptFormatter.formatCustomerReceipt(
         orderDoc as any,
         restaurantDoc as any,
         timezone,
       );
 
-      // 7. For each matching printer: create PrintJob → publish to Kafka
+      // 8. For each selected printer: create PrintJob → publish to Kafka
       const producer = getProducer();
-      for (const printer of receiptPrinters) {
+      for (const printer of selectedPrinters) {
         const printerId = printer._id.toString();
         try {
           // Create PrintJob with status 'queued'
@@ -609,7 +617,17 @@ export class OrderEventConsumer {
         return;
       }
 
-      // 3. Load order and restaurant data for kitchen ticket formatting
+      // 3. Apply distribution mode — use 'kitchen_' prefix for index key to separate from receipt round-robin
+      const kitchenIndexKey = orderType
+        ? `kitchen_${ORDER_TYPE_TO_PRINT_SETTING[orderType]?.printerOrderType ?? orderType}`
+        : 'kitchen';
+      const selectedKitchenPrinters = await this.selectPrintersForJob(
+        kitchenPrinters,
+        settings,
+        kitchenIndexKey,
+      );
+
+      // 4. Load order and restaurant data for kitchen ticket formatting
       const [orderDoc, restaurantDoc] = await Promise.all([
         Order.findById(orderId).lean().exec(),
         Restaurant.findById(restaurantId).lean().exec(),
@@ -623,19 +641,19 @@ export class OrderEventConsumer {
         return;
       }
 
-      // 4. Resolve timezone for ticket timestamps
+      // 5. Resolve timezone for ticket timestamps
       const timezone = await timezoneService.getTimezone(restaurantId);
 
-      // 5. Format kitchen ticket HTML (large order number, items only, NO pricing)
+      // 6. Format kitchen ticket HTML (large order number, items only, NO pricing)
       const kitchenHtml = this.receiptFormatter.formatKitchenTicket(
         orderDoc as any,
         restaurantDoc as any,
         timezone,
       );
 
-      // 6. For each kitchen printer: create PrintJob → publish to Kafka
+      // 7. For each selected kitchen printer: create PrintJob → publish to Kafka
       const producer = getProducer();
-      for (const printer of kitchenPrinters) {
+      for (const printer of selectedKitchenPrinters) {
         const printerId = printer._id.toString();
         try {
           const printJob = await this.printJobRepo.create({
@@ -678,6 +696,40 @@ export class OrderEventConsumer {
     } catch (err) {
       log.error({ err, restaurantId, orderId }, 'Kitchen print trigger failed — order flow continues');
     }
+  }
+
+  /**
+   * Select printers for a print job based on the restaurant's distributionMode.
+   *
+   * - 'duplicate' (default): returns all printers (every matching printer prints every order).
+   * - 'distribute': picks ONE printer via round-robin using lastDistributedIndex[indexKey],
+   *   increments the index (wrapping at array length), and persists it to the DB.
+   *
+   * Edge cases: single printer always returned regardless of mode; empty array returns empty.
+   */
+  private async selectPrintersForJob(
+    printers: IPrinterDocument[],
+    printerSettings: IPrinterSettingsDocument,
+    indexKey: string,
+  ): Promise<IPrinterDocument[]> {
+    if (printers.length <= 1) return printers;
+    if (printerSettings.distributionMode !== 'distribute') return printers;
+
+    // Round-robin: pick one printer, advance index
+    let currentIndex = printerSettings.lastDistributedIndex?.get(indexKey) ?? 0;
+    if (currentIndex >= printers.length) currentIndex = 0;
+
+    const selected = printers[currentIndex];
+    const nextIndex = (currentIndex + 1) % printers.length;
+
+    // Persist next index atomically
+    await this.printerSettingsRepo.updateDistributedIndex(
+      printerSettings.restaurantId,
+      indexKey,
+      nextIndex,
+    );
+
+    return [selected];
   }
 
   /**

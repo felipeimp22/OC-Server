@@ -212,13 +212,16 @@ export async function printerRoutes(app: FastifyInstance): Promise<void> {
   });
 
   // POST /api/v1/printers/orders/:orderId/print — Manually trigger print for an order
+  // NOTE: Manual print ALWAYS sends to ALL matching printers regardless of distributionMode.
+  // This is intentional — the user explicitly chose to print, so we duplicate to every printer.
+  // Distribution mode (round-robin) only applies to automatic triggers (auto-print, kitchen print).
   app.post('/orders/:orderId/print', async (request: FastifyRequest, reply: FastifyReply) => {
     const { orderId } = request.params as { orderId: string };
 
     const order = await Order.findById(orderId).lean().exec();
     if (!order) return reply.code(404).send({ error: 'Order not found' });
 
-    // Find enabled printers for this restaurant
+    // Find enabled printers for this restaurant — always send to ALL (no distribution filtering)
     const orderType = (order as any).type ?? 'pickup';
     const printers = await printerRepo.findEnabledByRestaurantAndOrderType(
       request.restaurantId,

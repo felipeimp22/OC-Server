@@ -47,4 +47,19 @@ export class PrinterSettingsRepository extends BaseRepository<IPrinterSettingsDo
     );
     return result as IPrinterSettingsDocument;
   }
+
+  /**
+   * Atomically update a single key in the lastDistributedIndex map.
+   * Used by round-robin distribution to persist the next printer index.
+   */
+  async updateDistributedIndex(
+    restaurantId: Types.ObjectId | string,
+    indexKey: string,
+    value: number,
+  ): Promise<void> {
+    await this.model.updateOne(
+      { restaurantId } as FilterQuery<IPrinterSettingsDocument>,
+      { $set: { [`lastDistributedIndex.${indexKey}`]: value } },
+    );
+  }
 }

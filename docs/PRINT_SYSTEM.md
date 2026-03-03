@@ -334,7 +334,10 @@ order.completed / order.status_changed (qualifying status)
    - `delivery` → `printDelivery`
    - `dine_in` / `dineIn` → `printDineIn`
 3. Find enabled printers with `type === 'receipt'` matching the order type
-4. For each printer: create PrintJob → format receipt → publish to `print.jobs`
+4. **Apply distribution mode** via `selectPrintersForJob()`:
+   - `duplicate`: all matching printers receive the order (default)
+   - `distribute`: one printer selected via round-robin using `lastDistributedIndex[orderType]`
+5. For each selected printer: create PrintJob → format receipt → publish to `print.jobs`
 
 ### Idempotency
 
@@ -362,7 +365,10 @@ order.status_changed → newStatus === 'preparing'
 
 1. **PrinterSettings** exists AND `enabled === true` (master toggle only — `autoPrint` not checked)
 2. Find enabled printers with `type === 'kitchen'` matching the order type
-3. For each printer: create PrintJob (trigger: `kitchen`) → format kitchen ticket → publish to `print.jobs`
+3. **Apply distribution mode** via `selectPrintersForJob()`:
+   - `duplicate`: all matching kitchen printers receive the order (default)
+   - `distribute`: one printer selected via round-robin using `lastDistributedIndex[kitchen_<orderType>]`
+4. For each selected printer: create PrintJob (trigger: `kitchen`) → format kitchen ticket → publish to `print.jobs`
 
 ### Dual-Event Safety
 
@@ -439,7 +445,7 @@ Used by MongoQueueAdapter only.
 |-----------|-------------|
 | `PrinterRepository` | `findByRestaurant(id)`, `findEnabledByRestaurantAndOrderType(id, type)` + BaseRepository CRUD |
 | `PrintJobRepository` | `findByRestaurant(id, filters?)`, `updateStatus(id, status, extra?)`, `findPendingByPrinter(id)`, `getStats(id)` |
-| `PrinterSettingsRepository` | `findByRestaurant(id)`, `upsert(id, data)` |
+| `PrinterSettingsRepository` | `findByRestaurant(id)`, `upsert(id, data)`, `updateDistributedIndex(id, key, value)` |
 
 ## REST API
 
@@ -457,7 +463,7 @@ All endpoints at `/api/v1/printers`, requiring auth headers (`Authorization: Bea
 | GET | `/api/v1/printers/jobs/stats` | Job counts by status |
 | POST | `/api/v1/printers/jobs/:printJobId/retry` | Retry failed/dead_letter job |
 | POST | `/api/v1/printers/:printerId/test` | Send test print |
-| POST | `/api/v1/printers/orders/:orderId/print` | Manual print for an order |
+| POST | `/api/v1/printers/orders/:orderId/print` | Manual print for an order (always duplicates to all printers — ignores distributionMode) |
 
 Input validation uses Zod schemas in `api/validators/index.ts`.
 
@@ -544,7 +550,7 @@ Types are in `oc-restaurant-manager/types/printer.ts`.
 
 The printer settings page (`components/settings/printer/PrinterSettings.tsx`) provides:
 
-- **Global Settings**: enable/disable toggle, auto-print toggle, order type checkboxes, concurrency slider
+- **Global Settings**: enable/disable toggle, auto-print toggle, order type checkboxes, distribution mode selector
 - **Printer Management**: list of registered printers with test/edit/delete actions
 - **Print Job Stats**: total/sent/failed/dead_letter counters
 - **Print History**: paginated table of recent print jobs with retry buttons
