@@ -10,12 +10,14 @@
 
 import type { QueuePort } from '../ports/QueuePort.js';
 import { KafkaQueueAdapter } from '../adapters/KafkaQueueAdapter.js';
+import { MongoQueueAdapter } from '../adapters/MongoQueueAdapter.js';
 
 /** Supported queue adapter types */
 export type QueueAdapter = 'kafka' | 'mongo';
 
 /** Singleton adapter instances (one per adapter type) */
 let kafkaAdapter: KafkaQueueAdapter | null = null;
+let mongoAdapter: MongoQueueAdapter | null = null;
 
 /**
  * Create or return a QueuePort for the given adapter.
@@ -25,7 +27,7 @@ let kafkaAdapter: KafkaQueueAdapter | null = null;
  *
  * @param adapter - Which queue backend to use
  * @returns The QueuePort implementation
- * @throws If the adapter is not yet implemented
+ * @throws If the adapter type is unknown
  */
 export function getQueueAdapter(adapter: QueueAdapter): QueuePort {
   switch (adapter) {
@@ -35,8 +37,10 @@ export function getQueueAdapter(adapter: QueueAdapter): QueuePort {
       }
       return kafkaAdapter;
     case 'mongo':
-      // Implemented in US-004 (MongoQueueAdapter)
-      throw new Error('Mongo adapter not implemented — see US-004');
+      if (!mongoAdapter) {
+        mongoAdapter = new MongoQueueAdapter();
+      }
+      return mongoAdapter;
     default:
       throw new Error(`Unknown queue adapter: ${adapter}`);
   }

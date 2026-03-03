@@ -299,6 +299,18 @@ The Kafka adapter wraps the existing KafkaJS infrastructure from `config/kafka.t
 
 The adapter is instantiated as a singleton via `QueueFactory.getQueueAdapter('kafka')`.
 
+### MongoQueueAdapter
+
+The Mongo adapter provides a polling-based queue for local development and testing environments without Kafka:
+
+- **`publish(topic, message)`** — Inserts a document into the `queue_messages` collection with status `'pending'`. Stores `message.headers` as a Mongoose Map.
+- **`consume(topic, handler, options)`** — Polls the collection every 1 second for documents matching `{ topic, status: 'pending' }`, ordered by `createdAt`. Claims messages atomically via `findOneAndUpdate` (sets status to `'processing'` and increments `attempts`). Respects `options.concurrency` by limiting parallel processing. On success → status `'completed'`; on error → status `'failed'`.
+- **`disconnect()`** — Stops all polling intervals.
+
+The `QueueMessage` Mongoose model (`src/domain/models/QueueMessage.ts`) stores: `topic`, `key`, `value` (Mixed), `headers` (Map), `status` (pending/processing/completed/failed), `attempts`, timestamps. Indexed on `(topic, status, createdAt)` for efficient polling.
+
+The adapter is instantiated as a singleton via `QueueFactory.getQueueAdapter('mongo')`. Set `QUEUE_ADAPTER=mongo` in env to use it.
+
 ## Service Layer
 
 | Service | Responsibility |
