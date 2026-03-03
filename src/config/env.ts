@@ -86,6 +86,21 @@ const envSchema = z.object({
     .string()
     .default('true')
     .transform((v) => v === 'true' || v === '1'),
+  /** Enable the print worker (Kafka consumer for print jobs) */
+  ENABLE_PRINT_WORKER: z
+    .string()
+    .default('true')
+    .transform((v) => v === 'true' || v === '1'),
+
+  // ─── Print System ──────────────────────────────────────────────────
+  /** Queue backend for print jobs: 'kafka' (production) or 'mongo' (dev fallback) */
+  QUEUE_ADAPTER: z.enum(['kafka', 'mongo']).default('kafka'),
+  /** Optional "From" address for print emails (falls back to EMAIL_FROM_ADDRESS) */
+  PRINT_EMAIL_FROM: z.string().email().optional(),
+  /** Max print jobs processed in parallel globally (default 2) */
+  PRINT_GLOBAL_CONCURRENCY: z.coerce.number().int().positive().default(2),
+  /** Max retry attempts for failed print jobs (default 3) */
+  PRINT_MAX_RETRIES: z.coerce.number().int().positive().default(3),
 });
 
 /** Inferred TypeScript type from the Zod schema */

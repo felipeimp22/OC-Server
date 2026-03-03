@@ -7,3 +7,5 @@
 export { getEmailProvider } from './EmailProviderFactory.js';
 export { getSMSProvider } from './SMSProviderFactory.js';
 export { getMetaProvider } from './MetaProviderFactory.js';
+export { getQueueAdapter } from './QueueFactory.js';
+export type { QueueAdapter } from './QueueFactory.js';

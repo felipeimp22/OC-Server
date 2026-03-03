@@ -272,6 +272,22 @@ All topic names are defined in `src/kafka/topics.ts` (`KAFKA_TOPICS`):
 | `crm.flow.timer` | Internal | Timer job fire events |
 | `crm.communications` | Internal | Communication dispatch |
 | `crm.notifications` | Produce | Outgoing notifications to oc-restaurant-manager |
+| `print.jobs` | Internal | Print job processing queue |
+| `print.jobs.retry` | Internal | Retry queue with exponential backoff |
+| `print.jobs.dead-letter` | Internal | Permanently failed print jobs |
+
+## Queue Abstraction Layer
+
+The print system uses a swappable queue abstraction (`src/ports/QueuePort.ts`) so the backend can be changed by switching an env var:
+
+| File | Purpose |
+|------|---------|
+| `src/ports/QueuePort.ts` | `QueuePort` interface, `QueueMessage`, `MessageHandler`, `ConsumeOptions` types |
+| `src/factories/QueueFactory.ts` | `getQueueAdapter(adapter)` — returns Kafka or Mongo adapter |
+| `src/adapters/KafkaQueueAdapter.ts` | Wraps existing KafkaJS producer/consumer |
+| `src/adapters/MongoQueueAdapter.ts` | Polling-based fallback for dev without Kafka |
+
+Configuration: `QUEUE_ADAPTER=kafka|mongo` in env. Print-specific env vars: `ENABLE_PRINT_WORKER`, `PRINT_EMAIL_FROM`, `PRINT_GLOBAL_CONCURRENCY`, `PRINT_MAX_RETRIES`.
 
 ## Service Layer
 
