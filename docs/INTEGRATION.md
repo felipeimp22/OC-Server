@@ -338,6 +338,69 @@ The "from" address for print emails follows this priority:
 
 ---
 
+## Printer REST API
+
+All printer endpoints are mounted at `/api/v1/printers` and require the standard auth headers (`Authorization: Bearer <token>`, `X-Restaurant-Id: <id>`).
+
+### Printer CRUD
+
+```typescript
+// List printers
+GET /api/v1/printers
+
+// Register new printer
+POST /api/v1/printers
+Body: { name: string, email: string, type?: 'receipt'|'kitchen', orderTypes?: string[] }
+
+// Update printer
+PUT /api/v1/printers/:printerId
+Body: Partial<{ name, email, type, orderTypes }>
+
+// Delete printer
+DELETE /api/v1/printers/:printerId
+```
+
+### Printer Settings
+
+```typescript
+// Get settings (returns defaults if none configured)
+GET /api/v1/printers/settings
+
+// Update settings (upserts)
+PUT /api/v1/printers/settings
+Body: { enabled?: boolean, autoPrint?: boolean, printPickup?: boolean,
+        printDelivery?: boolean, printDineIn?: boolean,
+        globalConcurrency?: number(1-5), emailFrom?: string|null }
+```
+
+### Print Jobs
+
+```typescript
+// List print jobs (paginated, filterable)
+GET /api/v1/printers/jobs?status=sent&printerId=abc&from=2026-01-01T00:00:00Z&to=2026-03-01T00:00:00Z&page=1&limit=20
+
+// Job stats by status
+GET /api/v1/printers/jobs/stats
+// Returns: { pending: 2, queued: 1, sent: 50, failed: 3, dead_letter: 1 }
+
+// Retry a failed/dead_letter job
+POST /api/v1/printers/jobs/:printJobId/retry
+// Resets attempts to 0, sets status to 'queued', publishes to print.jobs Kafka topic
+```
+
+### Manual Print & Test
+
+```typescript
+// Test print — sends sample receipt to verify connectivity
+POST /api/v1/printers/:printerId/test
+
+// Manual print — creates PrintJob(s) for all matching printers
+POST /api/v1/printers/orders/:orderId/print
+// Returns: { success: true, printJobIds: [...], printerCount: N }
+```
+
+---
+
 ## Docker Deployment
 
 ```bash

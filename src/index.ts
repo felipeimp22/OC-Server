@@ -35,6 +35,7 @@ import {
   systemRoutes,
   trackingRoutes,
   eventRoutes,
+  printerRoutes,
 } from './api/routes/index.js';
 import {
   OrderEventConsumer,
@@ -131,6 +132,7 @@ function buildApp() {
   app.register(analyticsRoutes, { prefix: '/api/v1/analytics' });
   app.register(campaignRoutes, { prefix: '/api/v1/campaigns' });
   app.register(eventRoutes, { prefix: '/api/v1/events' });
+  app.register(printerRoutes, { prefix: '/api/v1/printers' });
 
   return app;
 }

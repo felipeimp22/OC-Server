@@ -105,3 +105,30 @@ export const createCampaignBody = z.object({
 });
 
 export const updateCampaignBody = createCampaignBody.partial();
+
+// ── Printers ──
+export const createPrinterBody = z.object({
+  name: z.string().min(1).max(200),
+  email: z.string().email(),
+  type: z.enum(['receipt', 'kitchen']).default('receipt'),
+  orderTypes: z.array(z.enum(['pickup', 'delivery', 'dineIn'])).default(['pickup', 'delivery', 'dineIn']),
+});
+
+export const updatePrinterBody = createPrinterBody.partial();
+
+export const updatePrinterSettingsBody = z.object({
+  enabled: z.boolean().optional(),
+  autoPrint: z.boolean().optional(),
+  printPickup: z.boolean().optional(),
+  printDelivery: z.boolean().optional(),
+  printDineIn: z.boolean().optional(),
+  globalConcurrency: z.coerce.number().int().min(1).max(5).optional(),
+  emailFrom: z.string().email().optional().nullable(),
+});
+
+export const printJobFiltersQuery = paginationQuery.extend({
+  status: z.enum(['pending', 'queued', 'sending', 'sent', 'failed', 'dead_letter']).optional(),
+  printerId: z.string().optional(),
+  from: z.string().datetime({ offset: true }).optional(),
+  to: z.string().datetime({ offset: true }).optional(),
+});

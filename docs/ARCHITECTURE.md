@@ -351,6 +351,26 @@ The `PrintDeadLetterConsumer` (`src/kafka/consumers/PrintDeadLetterConsumer.ts`)
 
 **Registration:** Guarded by `ENABLE_PRINT_WORKER` feature flag in `src/index.ts`. Consumer group: `print-dead-letter-group`.
 
+### Printer REST API
+
+The printer API (`src/api/routes/printers.ts`) is registered at `/api/v1/printers`. All endpoints require auth (JWT + X-Restaurant-Id) via the global preHandler middleware.
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/api/v1/printers` | List printers for restaurant |
+| POST | `/api/v1/printers` | Register new printer (name, email, type, orderTypes) |
+| PUT | `/api/v1/printers/:printerId` | Update printer config |
+| DELETE | `/api/v1/printers/:printerId` | Remove printer |
+| GET | `/api/v1/printers/settings` | Get restaurant printer settings |
+| PUT | `/api/v1/printers/settings` | Update printer settings (autoPrint, concurrency, etc.) |
+| GET | `/api/v1/printers/jobs` | List print jobs with filters (status, printerId, dateRange, pagination) |
+| GET | `/api/v1/printers/jobs/stats` | Print job counts grouped by status |
+| POST | `/api/v1/printers/jobs/:printJobId/retry` | Retry a failed/dead_letter job (resets attempts, publishes to print.jobs) |
+| POST | `/api/v1/printers/:printerId/test` | Send test print via PrintDeliveryService |
+| POST | `/api/v1/printers/orders/:orderId/print` | Manual print trigger — finds matching printers, creates PrintJob(s), publishes to print.jobs |
+
+Input validation uses Zod schemas (`api/validators/index.ts`): `createPrinterBody`, `updatePrinterBody`, `updatePrinterSettingsBody`, `printJobFiltersQuery`.
+
 ## Service Layer
 
 | Service | Responsibility |
