@@ -289,6 +289,16 @@ The print system uses a swappable queue abstraction (`src/ports/QueuePort.ts`) s
 
 Configuration: `QUEUE_ADAPTER=kafka|mongo` in env. Print-specific env vars: `ENABLE_PRINT_WORKER`, `PRINT_EMAIL_FROM`, `PRINT_GLOBAL_CONCURRENCY`, `PRINT_MAX_RETRIES`.
 
+### KafkaQueueAdapter
+
+The Kafka adapter wraps the existing KafkaJS infrastructure from `config/kafka.ts`:
+
+- **`publish(topic, message)`** — Uses the singleton Kafka producer (`getProducer()`). Serializes `message.value` to JSON, uses `message.key` for partition keying (typically `restaurantId`), and forwards `message.headers` as Kafka record headers.
+- **`consume(topic, handler, options)`** — Creates a new KafkaJS consumer via `createConsumer()`. Defaults `groupId` to `'print-worker-group'`. Respects `options.concurrency` via KafkaJS's `partitionsConsumedConcurrently`. Deserializes messages and converts Kafka Buffer headers to strings before invoking the handler.
+- **`disconnect()`** — Gracefully disconnects all consumers created by this adapter instance.
+
+The adapter is instantiated as a singleton via `QueueFactory.getQueueAdapter('kafka')`.
+
 ## Service Layer
 
 | Service | Responsibility |

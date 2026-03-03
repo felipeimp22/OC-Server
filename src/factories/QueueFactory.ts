@@ -9,12 +9,19 @@
  */
 
 import type { QueuePort } from '../ports/QueuePort.js';
+import { KafkaQueueAdapter } from '../adapters/KafkaQueueAdapter.js';
 
 /** Supported queue adapter types */
 export type QueueAdapter = 'kafka' | 'mongo';
 
+/** Singleton adapter instances (one per adapter type) */
+let kafkaAdapter: KafkaQueueAdapter | null = null;
+
 /**
  * Create or return a QueuePort for the given adapter.
+ *
+ * Returns a singleton instance for each adapter type so that
+ * consumers/producers are reused across the application.
  *
  * @param adapter - Which queue backend to use
  * @returns The QueuePort implementation
@@ -23,8 +30,10 @@ export type QueueAdapter = 'kafka' | 'mongo';
 export function getQueueAdapter(adapter: QueueAdapter): QueuePort {
   switch (adapter) {
     case 'kafka':
-      // Implemented in US-003 (KafkaQueueAdapter)
-      throw new Error('Kafka adapter not implemented — see US-003');
+      if (!kafkaAdapter) {
+        kafkaAdapter = new KafkaQueueAdapter();
+      }
+      return kafkaAdapter;
     case 'mongo':
       // Implemented in US-004 (MongoQueueAdapter)
       throw new Error('Mongo adapter not implemented — see US-004');
