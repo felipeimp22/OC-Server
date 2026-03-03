@@ -783,15 +783,22 @@ This is native KafkaJS backpressure — no external rate limiters needed.
 
 Generated for `auto`, `manual`, and `retry` triggers.
 
-Content:
-- Restaurant header (name, address, phone)
-- Order number + type badge (Pickup/Delivery/Dine-In)
-- Customer name (when available)
-- Itemized list with quantities, modifiers, and special instructions
-- Pricing breakdown: subtotal, tax, delivery fee, platform fee, tip, total
-- Payment status
-- Timestamp in restaurant timezone
-- "Thank you for your order!" footer
+**Signature:** `formatCustomerReceipt(order, restaurant, timezone, fontSize?: 'small' | 'normal' | 'large')`
+
+Layout follows the Star Micronics specification — 576px single-column `<table>` with bordered section boxes:
+
+1. **Header** — Restaurant name (large decorative text), Order ID, date in timezone
+2. **Order Type Box** — Bordered box with `PICKUP` / `DELIVERY` / `DINE-IN` in 2x body font
+3. **Service Date Box** — Bordered box: `{date} | ASAP`
+4. **Customer Info Box** — Bordered box: Name, Phone, Email, Address (label/value pairs)
+5. **Items Section** — `{count} Items` header, each item: `qty X name` + `$price`, modifiers indented, special instructions in italics
+6. **Totals Section** — Right-aligned: Subtotal, Tax, Delivery Fee, Platform Fee, Processing Fee/CC, Tip, then bold TOTAL
+7. **Payment Footer Box** — Bordered box: `PAID` or `PENDING` + payment method lowercase
+
+Font size presets (body / header / section px):
+- `small`: 10 / 22 / 13
+- `normal` (default): 12 / 28 / 16
+- `large`: 14 / 34 / 19
 
 ### Kitchen Ticket (`formatKitchenTicket`)
 
@@ -809,10 +816,12 @@ Content:
 
 - **Inline CSS only** — no external stylesheets (email rendering)
 - **Monospace font** (Courier New) for alignment
-- **Max width 320px** — optimized for ~80mm thermal paper (~42 characters/line)
+- **Customer receipt width: 576px** (80mm at 180dpi) — single-column `<table>` with bordered section boxes
+- **Kitchen ticket width: 320px** — simpler layout (~42 characters/line)
 - All monetary values: `(cents / 100).toFixed(2)` with currency symbol
 - Timestamps: `Intl.DateTimeFormat` with restaurant timezone from store_hours
 - User-provided content escaped via `escapeHtml()` to prevent injection
+- Dynamic content stripped of HTML tags via `stripHtmlTags()` regex sanitizer
 
 ## Email-Based Print Delivery
 

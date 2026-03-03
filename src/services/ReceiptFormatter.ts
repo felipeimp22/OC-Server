@@ -3,16 +3,34 @@
  *
  * Produces two formats:
  * - Customer receipts: full order details with pricing, restaurant info, footer
+ *   (Star Micronics layout spec: bordered section boxes, 576px table width)
  * - Kitchen tickets: large order number, items with modifiers/instructions only, NO pricing
  *
  * HTML uses inline CSS only (email rendering). Monospace font for alignment.
- * Width optimized for ~80mm thermal paper (~42 characters per line).
+ * Width: 576px (80mm at 180dpi) for customer receipts; ~320px for kitchen tickets.
  *
  * @module services/ReceiptFormatter
  */
 
 import type { IOrderDocument, IOrderItem } from '../domain/models/external/Order.js';
 import type { IRestaurantDocument } from '../domain/models/external/Restaurant.js';
+
+/** Font size preset type */
+export type FontSizePreset = 'small' | 'normal' | 'large';
+
+/** Font size configuration */
+interface FontSizes {
+  body: number;
+  header: number;
+  section: number;
+}
+
+/** Font size presets (in px) */
+const FONT_SIZE_MAP: Record<FontSizePreset, FontSizes> = {
+  small: { body: 10, header: 22, section: 13 },
+  normal: { body: 12, header: 28, section: 16 },
+  large: { body: 14, header: 34, section: 19 },
+};
 
 /**
  * Format cents to a dollar string (e.g. 1250 → "12.50").
@@ -37,6 +55,18 @@ function formatTimestamp(date: Date, timezone: string): string {
 }
 
 /**
+ * Format just the date portion in the given timezone.
+ */
+function formatDateOnly(date: Date, timezone: string): string {
+  return new Intl.DateTimeFormat('en-US', {
+    timeZone: timezone,
+    year: 'numeric',
+    month: 'short',
+    day: 'numeric',
+  }).format(date);
+}
+
+/**
  * Get a human-readable order type badge label.
  */
 function orderTypeBadge(orderType: string): string {
@@ -54,7 +84,7 @@ function orderTypeBadge(orderType: string): string {
 }
 
 /**
- * Format an order item's modifiers/options as a string.
+ * Format an order item's modifiers/options as a string (used by kitchen tickets).
  */
 function formatModifiers(item: IOrderItem): string {
   if (!item.options || item.options.length === 0) return '';
@@ -64,9 +94,54 @@ function formatModifiers(item: IOrderItem): string {
 }
 
 /**
- * Shared inline styles for receipt HTML.
+ * Strip HTML tags from a string to prevent injection from dynamic content.
  */
-const BASE_STYLES = `
+function stripHtmlTags(str: string): string {
+  return str.replace(/<[^>]*>/g, '');
+}
+
+/**
+ * Build a bordered box cell for the receipt table.
+ */
+function borderedBox(content: string, padding = 8): string {
+  return `<tr><td style="border: 1px solid #000; padding: ${padding}px;">${content}</td></tr>`;
+}
+
+/**
+ * Build a spacer row.
+ */
+function spacerRow(height = 8): string {
+  return `<tr><td style="height: ${height}px;"></td></tr>`;
+}
+
+/**
+ * Render a totals line as a mini table row (label left, value right).
+ */
+function totalsLine(label: string, value: string, fontSize: string): string {
+  return `<table style="width: 100%; border-collapse: collapse;"><tr>
+    <td style="font-size: ${fontSize}; padding: 2px 0;">${escapeHtml(label)}</td>
+    <td style="font-size: ${fontSize}; padding: 2px 0; text-align: right;">${value}</td>
+  </tr></table>`;
+}
+
+/**
+ * Extract a readable address string from an order's customerAddress field.
+ */
+function extractAddress(order: IOrderDocument): string {
+  const addr = order.customerAddress;
+  if (!addr) return '';
+  if (typeof addr === 'string') return addr;
+  const parts: string[] = [];
+  if (addr.street || addr.line1) parts.push(String(addr.street || addr.line1));
+  if (addr.line2) parts.push(String(addr.line2));
+  if (addr.city) parts.push(String(addr.city));
+  if (addr.state) parts.push(String(addr.state));
+  if (addr.zip || addr.zipCode || addr.postalCode) parts.push(String(addr.zip || addr.zipCode || addr.postalCode));
+  return parts.join(', ');
+}
+
+/** Kitchen ticket inline styles (320px max width) */
+const KITCHEN_STYLES = `
   font-family: 'Courier New', Courier, monospace;
   font-size: 12px;
   line-height: 1.4;
@@ -81,130 +156,177 @@ const HR = '<hr style="border: none; border-top: 1px dashed #000; margin: 8px 0;
 
 export class ReceiptFormatter {
   /**
-   * Generate an HTML customer receipt.
+   * Generate an HTML customer receipt matching the Star Micronics layout spec.
    *
-   * Content: restaurant header, order number/type, customer name, items with
-   * quantities and modifiers, pricing breakdown, payment status, special
-   * instructions, timestamp, and footer.
+   * Layout: 576px single-column table with bordered section boxes.
+   * Sections: Header → Order Type → Service Date → Customer Info → Items → Totals → Payment Footer.
    */
   formatCustomerReceipt(
     order: IOrderDocument,
     restaurant: IRestaurantDocument,
     timezone: string,
+    fontSize: FontSizePreset = 'normal',
   ): string {
+    const sizes = FONT_SIZE_MAP[fontSize] || FONT_SIZE_MAP.normal;
     const currencySymbol = (order as any).currencySymbol ?? '$';
+    const orderTypeLabel = orderTypeBadge(order.orderType);
 
-    // --- Header ---
-    const header = `
-      <div style="text-align: center; margin-bottom: 8px;">
-        <div style="font-size: 16px; font-weight: bold;">${escapeHtml(restaurant.name)}</div>
-        <div>${escapeHtml(restaurant.street)}</div>
-        <div>${escapeHtml(restaurant.city)}, ${escapeHtml(restaurant.state)} ${escapeHtml(restaurant.zipCode)}</div>
-        <div>${escapeHtml(restaurant.phone)}</div>
-      </div>
+    // Derived sizes
+    const bodyPx = `${sizes.body}px`;
+    const headerPx = `${sizes.header}px`;
+    const sectionPx = `${sizes.section}px`;
+    const orderTypePx = `${sizes.body * 2}px`;
+    const totalPx = `${Math.round(sizes.body * 1.3)}px`;
+    const smallPx = `${Math.round(sizes.body * 0.85)}px`;
+
+    // --- Section 1: Header ---
+    const headerSection = `
+      <tr><td style="text-align: center; padding: 12px 8px;">
+        <div style="font-size: ${headerPx}; font-weight: bold; letter-spacing: 1px;">${escapeHtml(restaurant.name)}</div>
+        <div style="font-size: ${bodyPx}; margin-top: 6px;">Order ID: #${escapeHtml(order.orderNumber)}</div>
+        <div style="font-size: ${smallPx}; margin-top: 4px; color: #333;">${formatTimestamp(order.createdAt, timezone)}</div>
+      </td></tr>
     `;
 
-    // --- Order info ---
-    const orderInfo = `
-      ${HR}
-      <div style="text-align: center; margin: 4px 0;">
-        <div style="font-size: 14px; font-weight: bold;">Order #${escapeHtml(order.orderNumber)}</div>
-        <div style="display: inline-block; padding: 2px 8px; background: #000; color: #fff; font-size: 11px; font-weight: bold; margin-top: 4px;">
-          ${orderTypeBadge(order.orderType)}
-        </div>
-      </div>
-    `;
+    // --- Section 2: Order Type Box ---
+    const orderTypeBox = borderedBox(
+      `<div style="text-align: center; font-size: ${orderTypePx}; font-weight: bold; letter-spacing: 2px;">${orderTypeLabel}</div>`,
+    );
 
-    // --- Customer ---
-    const customerSection = order.customerName
-      ? `<div style="margin: 4px 0;">Customer: ${escapeHtml(order.customerName)}</div>`
-      : '';
+    // --- Section 3: Service Date Box ---
+    const serviceDateStr = formatDateOnly(order.createdAt, timezone);
+    const serviceDateBox = borderedBox(
+      `<div style="font-size: ${sectionPx};">
+        <div style="font-weight: normal; margin-bottom: 4px;">Service Date</div>
+        <div style="font-weight: bold;">${serviceDateStr} | ASAP</div>
+      </div>`,
+    );
 
-    // --- Items ---
+    // --- Section 4: Customer Info Box ---
+    const address = extractAddress(order);
+    const customerInfoBox = borderedBox(
+      `<div style="font-size: ${bodyPx}; line-height: 1.6;">
+        <div>Name: <strong>${escapeHtml(order.customerName)}</strong></div>
+        <div>Phone: <strong>${escapeHtml(order.customerPhone)}</strong></div>
+        <div>Email: <strong>${escapeHtml(order.customerEmail)}</strong></div>
+        <div>Address: <strong>${address ? escapeHtml(address) : ''}</strong></div>
+      </div>`,
+    );
+
+    // --- Section 5: Items ---
+    const itemCount = order.items.reduce((sum, item) => sum + item.quantity, 0);
+
     const itemRows = order.items
       .map((item) => {
-        const modifiers = formatModifiers(item);
-        const instructions = item.specialInstructions
-          ? `<br/><span style="font-style: italic;">  Note: ${escapeHtml(item.specialInstructions)}</span>`
-          : '';
-        return `
+        let row = `
           <tr>
-            <td style="vertical-align: top; padding: 2px 0;">${item.quantity}x</td>
-            <td style="vertical-align: top; padding: 2px 4px;">
-              ${escapeHtml(item.name)}${modifiers ? '<br/>' + modifiers : ''}${instructions}
-            </td>
-            <td style="vertical-align: top; padding: 2px 0; text-align: right;">
-              ${formatMoney(item.price * item.quantity, currencySymbol)}
-            </td>
-          </tr>
-        `;
+            <td colspan="2" style="padding: 6px 0; border-bottom: 1px solid #ccc;">
+              <table style="width: 100%; border-collapse: collapse;"><tr>
+                <td style="font-size: ${bodyPx}; vertical-align: top;">${item.quantity} X&nbsp;&nbsp;${escapeHtml(item.name)}</td>
+                <td style="font-size: ${bodyPx}; vertical-align: top; text-align: right; white-space: nowrap;">${formatMoney(item.price * item.quantity, currencySymbol)}</td>
+              </tr></table>`;
+
+        // Modifiers
+        if (item.options && item.options.length > 0) {
+          for (const opt of item.options) {
+            const modLabel = `${opt.name}: ${opt.choice}`;
+            const modPrice = opt.priceAdjustment && opt.priceAdjustment !== 0
+              ? ` ${formatMoney(opt.priceAdjustment, currencySymbol)}`
+              : '';
+            const qty = opt.quantity ?? 1;
+            row += `
+              <div style="font-size: ${smallPx}; padding-left: 24px; color: #333;">
+                &nbsp;&nbsp;&nbsp;${qty} X&nbsp;&nbsp;${escapeHtml(stripHtmlTags(modLabel))}${modPrice}
+              </div>`;
+          }
+        }
+
+        // Special instructions
+        if (item.specialInstructions) {
+          row += `
+            <div style="font-size: ${smallPx}; padding-left: 12px; font-style: italic; color: #555; margin-top: 2px;">
+              ${escapeHtml(stripHtmlTags(item.specialInstructions))}
+            </div>`;
+        }
+
+        row += `</td></tr>`;
+        return row;
       })
       .join('');
 
-    const itemsTable = `
-      ${HR}
-      <table style="width: 100%; border-collapse: collapse;">
-        ${itemRows}
-      </table>
+    const itemsSection = `
+      <tr><td style="padding: 0;">
+        <div style="font-size: ${sectionPx}; font-weight: bold; padding: 8px 0 4px 0; border-bottom: 2px solid #000;">
+          ${itemCount} Item${itemCount !== 1 ? 's' : ''}
+        </div>
+        <table style="width: 100%; border-collapse: collapse;">
+          ${itemRows}
+        </table>
+      </td></tr>
     `;
 
-    // --- Pricing breakdown ---
-    const pricingLines: string[] = [];
-    pricingLines.push(line('Subtotal', formatMoney(order.subtotal, currencySymbol)));
-    pricingLines.push(line('Tax', formatMoney(order.tax, currencySymbol)));
+    // --- Section 6: Totals ---
+    const totalsRows: string[] = [];
+    totalsRows.push(totalsLine('Subtotal', formatMoney(order.subtotal, currencySymbol), bodyPx));
+    totalsRows.push(totalsLine('Tax', formatMoney(order.tax, currencySymbol), bodyPx));
 
     if (order.deliveryFee > 0) {
-      pricingLines.push(line('Delivery Fee', formatMoney(order.deliveryFee, currencySymbol)));
+      totalsRows.push(totalsLine('Delivery Fee', formatMoney(order.deliveryFee, currencySymbol), bodyPx));
     }
     if (order.platformFee > 0) {
-      pricingLines.push(line('Platform Fee', formatMoney(order.platformFee, currencySymbol)));
+      totalsRows.push(totalsLine('Platform Fee', formatMoney(order.platformFee, currencySymbol), bodyPx));
+    }
+    if (order.processingFee > 0) {
+      totalsRows.push(totalsLine('Processing Fee / CC', formatMoney(order.processingFee, currencySymbol), bodyPx));
     }
     if (order.tip > 0) {
-      pricingLines.push(line('Tip', formatMoney(order.tip, currencySymbol)));
+      totalsRows.push(totalsLine('Tip', formatMoney(order.tip, currencySymbol), bodyPx));
     }
 
-    const pricingSection = `
-      ${HR}
-      ${pricingLines.join('')}
-      ${HR}
-      <div style="font-weight: bold; display: flex; justify-content: space-between;">
-        <span>TOTAL</span>
-        <span>${formatMoney(order.total, currencySymbol)}</span>
-      </div>
+    const totalsSection = `
+      <tr><td style="padding: 8px 0;">
+        ${totalsRows.join('')}
+        <hr style="border: none; border-top: 2px solid #000; margin: 8px 0;" />
+        <table style="width: 100%; border-collapse: collapse;"><tr>
+          <td style="font-size: ${totalPx}; font-weight: bold;">TOTAL</td>
+          <td style="font-size: ${totalPx}; font-weight: bold; text-align: right;">${formatMoney(order.total, currencySymbol)}</td>
+        </tr></table>
+      </td></tr>
     `;
 
-    // --- Payment status ---
-    const paymentSection = `
-      <div style="margin: 4px 0;">Payment: ${escapeHtml(order.paymentStatus)} (${escapeHtml(order.paymentMethod)})</div>
-    `;
+    // --- Section 7: Payment Footer Box ---
+    const isPaid = order.paymentStatus === 'paid' || order.paymentStatus === 'succeeded';
+    const paymentStatusLabel = isPaid ? 'PAID' : 'PENDING';
+    const paymentMethodLabel = escapeHtml(stripHtmlTags(order.paymentMethod || ''));
 
-    // --- Timestamp ---
-    const timestampSection = `
-      <div style="margin: 4px 0; font-size: 11px;">
-        ${formatTimestamp(order.createdAt, timezone)}
-      </div>
-    `;
+    const paymentBox = borderedBox(
+      `<div style="text-align: center;">
+        <div style="font-size: ${orderTypePx}; font-weight: bold; letter-spacing: 2px;">${paymentStatusLabel}</div>
+        <div style="font-size: ${bodyPx}; margin-top: 4px;">${paymentMethodLabel.toLowerCase()}</div>
+      </div>`,
+    );
 
-    // --- Footer ---
-    const footer = `
-      ${HR}
-      <div style="text-align: center; margin-top: 8px; font-size: 11px;">
-        Thank you for your order!
-      </div>
-    `;
-
+    // --- Assemble receipt ---
     return `<!DOCTYPE html>
 <html>
 <head><meta charset="utf-8"/></head>
-<body style="${BASE_STYLES}">
-  ${header}
-  ${orderInfo}
-  ${customerSection}
-  ${itemsTable}
-  ${pricingSection}
-  ${paymentSection}
-  ${timestampSection}
-  ${footer}
+<body style="margin: 0; padding: 0; font-family: 'Courier New', Courier, monospace; font-size: ${bodyPx}; line-height: 1.4; color: #000;">
+  <table style="width: 576px; border-collapse: collapse; margin: 0 auto;" cellpadding="0" cellspacing="0">
+    ${headerSection}
+    ${spacerRow(6)}
+    ${orderTypeBox}
+    ${spacerRow(6)}
+    ${serviceDateBox}
+    ${spacerRow(6)}
+    ${customerInfoBox}
+    ${spacerRow(6)}
+    ${itemsSection}
+    ${totalsSection}
+    ${spacerRow(6)}
+    ${paymentBox}
+    ${spacerRow(12)}
+    <tr><td style="text-align: center; font-size: ${smallPx}; color: #555;">Thank you for your order!</td></tr>
+  </table>
 </body>
 </html>`;
   }
@@ -270,20 +392,13 @@ export class ReceiptFormatter {
     return `<!DOCTYPE html>
 <html>
 <head><meta charset="utf-8"/></head>
-<body style="${BASE_STYLES}">
+<body style="${KITCHEN_STYLES}">
   ${header}
   ${itemsTable}
   ${timestampSection}
 </body>
 </html>`;
   }
-}
-
-/**
- * Helper to render a line with label and value justified.
- */
-function line(label: string, value: string): string {
-  return `<div style="display: flex; justify-content: space-between;"><span>${label}</span><span>${value}</span></div>`;
 }
 
 /**
