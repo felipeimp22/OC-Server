@@ -179,7 +179,7 @@ interface KafkaEvent {
 
 ### Required Kafka Topics
 
-All 8 topics are auto-created by `ensureTopics()` on startup (`ENABLE_KAFKA=true`):
+All 11 topics are auto-created by `ensureTopics()` on startup (`ENABLE_KAFKA=true`):
 
 | Topic | Producer | Consumer |
 |-------|----------|----------|
@@ -191,6 +191,9 @@ All 8 topics are auto-created by `ensureTopics()` on startup (`ENABLE_KAFKA=true
 | `crm.flow.timer` | oc-server | oc-server |
 | `crm.communications` | oc-server | oc-server |
 | `crm.notifications` | oc-server | oc-restaurant-manager |
+| `print.jobs` | oc-server (OrderEventConsumer, API routes) | oc-server (PrintJobConsumer) |
+| `print.jobs.retry` | oc-server (PrintJobConsumer) | oc-server (PrintJobConsumer) |
+| `print.jobs.dead-letter` | oc-server (PrintJobConsumer) | oc-server (PrintDeadLetterConsumer) |
 
 ---
 
@@ -306,6 +309,8 @@ When an email action executes, `ActionService.executeSendEmail()` resolves recip
 ---
 
 ## Print Delivery (Email-Based Printing)
+
+> **Full print system documentation:** See [PRINT_SYSTEM.md](./PRINT_SYSTEM.md) for complete architecture, job lifecycle, retry strategy, concurrency model, and troubleshooting.
 
 The `PrintDeliveryService` sends HTML receipt emails to Star Micronics printer device emails via the existing Mailgun provider.
 

@@ -286,6 +286,8 @@ All topic names are defined in `src/kafka/topics.ts` (`KAFKA_TOPICS`):
 
 ## Queue Abstraction Layer
 
+> **Comprehensive print system documentation:** See [PRINT_SYSTEM.md](./PRINT_SYSTEM.md) for the full architecture, lifecycle, concurrency model, receipt formatting, and how-to guides.
+
 The print system uses a swappable queue abstraction (`src/ports/QueuePort.ts`) so the backend can be changed by switching an env var:
 
 | File | Purpose |
