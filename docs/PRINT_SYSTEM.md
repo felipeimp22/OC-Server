@@ -552,7 +552,11 @@ The printer settings page (`components/settings/printer/PrinterSettings.tsx`) pr
 
 - **Global Settings**: enable/disable toggle, auto-print toggle, order type checkboxes, distribution mode selector
 - **Printer Management**: list of registered printers with test/edit/delete actions
+  - Each printer card shows order types as colored badges: Pickup (blue/info), Delivery (green/success), Dine-In (orange/warning)
+  - When 2+ printers share an order type, a distribution indicator appears on the shared badge: "(copies to all)" in duplicate mode, "(round-robin)" in distribute mode
 - **Print Job Stats**: total/sent/failed/dead_letter counters
 - **Print History**: paginated table of recent print jobs with retry buttons
+
+The Add/Edit Printer modals include helper text below Order Types checkboxes explaining the current distribution mode behavior for shared order types.
 
 The orders page includes a "Print Receipt" button per order for manual printing.
