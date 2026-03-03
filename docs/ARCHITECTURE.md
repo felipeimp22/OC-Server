@@ -375,6 +375,30 @@ order.completed / order.status_changed (qualifying status)
 - Failures are caught and logged but never block the order flow.
 - If PrinterSettings doesn't exist or is disabled, auto-print is silently skipped.
 
+### Kitchen Print Trigger (OrderEventConsumer)
+
+When an order status changes to `preparing`, the `OrderEventConsumer` triggers kitchen ticket printing via `triggerKitchenPrint()`:
+
+```
+order.status_changed (newStatus === 'preparing')
+  → handleOrderStatusChanged()
+    → triggerKitchenPrint(restaurantId, orderId, orderType)
+      1. Load PrinterSettings → check enabled (master toggle only, autoPrint not checked)
+      2. Find enabled kitchen printers (type='kitchen') matching order type
+      3. Load Order + Restaurant from DB for ticket formatting
+      4. Resolve timezone via TimezoneService
+      5. Format kitchen ticket HTML via ReceiptFormatter.formatKitchenTicket()
+      6. For each kitchen printer: create PrintJob (status='queued', trigger='kitchen') → publish to print.jobs topic
+```
+
+**Key design decisions:**
+- Kitchen printers (`type='kitchen'`) only fire on status→`preparing`, never on order completion.
+- Only the master `PrinterSettings.enabled` toggle is checked — `autoPrint` is irrelevant for kitchen triggers.
+- Kitchen tickets use `formatKitchenTicket()`: large order number, items with modifiers/instructions, NO pricing.
+- The dual-event scenario (`order.status_changed` AND `order.completed` both fire for status `completed`) is safe because kitchen trigger only fires for `newStatus === 'preparing'`.
+- Failures are caught and logged but never block the order flow.
+- If no kitchen printers are configured, the trigger is silently skipped.
+
 ### Printer REST API
 
 The printer API (`src/api/routes/printers.ts`) is registered at `/api/v1/printers`. All endpoints require auth (JWT + X-Restaurant-Id) via the global preHandler middleware.

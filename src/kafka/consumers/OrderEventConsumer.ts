@@ -15,6 +15,7 @@ import { TriggerService } from '../../services/TriggerService.js';
 import { FlowRepository } from '../../repositories/FlowRepository.js';
 import { PrinterSettingsRepository } from '../../repositories/PrinterSettingsRepository.js';
 import { PrinterRepository } from '../../repositories/PrinterRepository.js';
+import type { IPrinterDocument } from '../../domain/models/Printer.js';
 import { PrintJobRepository } from '../../repositories/PrintJobRepository.js';
 import { ReceiptFormatter } from '../../services/ReceiptFormatter.js';
 import { timezoneService } from '../../services/TimezoneService.js';
@@ -322,6 +323,15 @@ export class OrderEventConsumer {
       previousStatus: (payload.previousStatus ?? payload.oldStatus) as string | undefined,
     });
 
+    // Kitchen print: trigger kitchen ticket printing when status moves to 'preparing'
+    if (newStatus === 'preparing' && payload.orderId) {
+      await this.triggerKitchenPrint(
+        restaurantId,
+        payload.orderId as string,
+        payload.orderType as string | undefined,
+      );
+    }
+
     // If the new status qualifies as "order completed", fire processOrderAsCompleted.
     // tryProcessEvent inside ensures this only executes once per order across all qualifying statuses.
     if (newStatus && ORDER_COMPLETED_QUALIFYING_STATUSES.includes(newStatus)) {
@@ -546,6 +556,127 @@ export class OrderEventConsumer {
     } catch (err) {
       // Non-critical: auto-print failure must never block the order flow
       log.error({ err, restaurantId, orderId }, 'Auto-print trigger failed — order flow continues');
+    }
+  }
+
+  /**
+   * Kitchen print: create print jobs for kitchen printers when an order enters 'preparing'.
+   *
+   * Finds enabled kitchen-type printers for the restaurant, creates a PrintJob per printer
+   * with trigger 'kitchen', formats a kitchen ticket (large order number, items only, NO pricing),
+   * and publishes to the print.jobs Kafka topic.
+   *
+   * Only fires for status 'preparing' — the dual-event scenario (status_changed + order.completed)
+   * is handled by the caller checking newStatus === 'preparing' before calling this method.
+   *
+   * Failures here do NOT affect the order flow — printing is best-effort.
+   */
+  private async triggerKitchenPrint(
+    restaurantId: string,
+    orderId: string,
+    orderType?: string,
+  ): Promise<void> {
+    try {
+      // 1. Check master print toggle — if printing is disabled entirely, skip
+      const settings = await this.printerSettingsRepo.findByRestaurant(restaurantId);
+      if (!settings || !settings.enabled) {
+        log.debug({ restaurantId }, 'Kitchen print skipped — printing not enabled');
+        return;
+      }
+
+      // 2. Find enabled kitchen printers for the restaurant
+      // Kitchen printers may also be scoped to order types, so filter by orderType if available
+      let kitchenPrinters: IPrinterDocument[];
+      if (orderType) {
+        const typeMapping = ORDER_TYPE_TO_PRINT_SETTING[orderType];
+        if (typeMapping) {
+          const printers = await this.printerRepo.findEnabledByRestaurantAndOrderType(
+            restaurantId,
+            typeMapping.printerOrderType,
+          );
+          kitchenPrinters = printers.filter((p) => p.type === 'kitchen');
+        } else {
+          kitchenPrinters = [];
+        }
+      } else {
+        // No order type info — find all enabled kitchen printers
+        const allPrinters = await this.printerRepo.findByRestaurant(restaurantId);
+        kitchenPrinters = allPrinters.filter((p) => p.type === 'kitchen' && p.enabled);
+      }
+
+      if (kitchenPrinters.length === 0) {
+        log.debug({ restaurantId, orderType }, 'Kitchen print skipped — no enabled kitchen printers');
+        return;
+      }
+
+      // 3. Load order and restaurant data for kitchen ticket formatting
+      const [orderDoc, restaurantDoc] = await Promise.all([
+        Order.findById(orderId).lean().exec(),
+        Restaurant.findById(restaurantId).lean().exec(),
+      ]);
+      if (!orderDoc) {
+        log.warn({ restaurantId, orderId }, 'Kitchen print skipped — order not found in DB');
+        return;
+      }
+      if (!restaurantDoc) {
+        log.warn({ restaurantId, orderId }, 'Kitchen print skipped — restaurant not found in DB');
+        return;
+      }
+
+      // 4. Resolve timezone for ticket timestamps
+      const timezone = await timezoneService.getTimezone(restaurantId);
+
+      // 5. Format kitchen ticket HTML (large order number, items only, NO pricing)
+      const kitchenHtml = this.receiptFormatter.formatKitchenTicket(
+        orderDoc as any,
+        restaurantDoc as any,
+        timezone,
+      );
+
+      // 6. For each kitchen printer: create PrintJob → publish to Kafka
+      const producer = getProducer();
+      for (const printer of kitchenPrinters) {
+        const printerId = printer._id.toString();
+        try {
+          const printJob = await this.printJobRepo.create({
+            restaurantId: printer.restaurantId,
+            printerId: printer._id,
+            orderId: orderDoc._id,
+            status: 'queued',
+            trigger: 'kitchen',
+            attempts: 0,
+            maxAttempts: env.PRINT_MAX_RETRIES ?? 3,
+            receiptHtml: kitchenHtml,
+            timezone,
+            scheduledAt: new Date(),
+          } as any);
+
+          await producer.send({
+            topic: KAFKA_TOPICS.PRINT_JOBS,
+            messages: [
+              {
+                key: restaurantId,
+                value: JSON.stringify({
+                  printJobId: printJob._id.toString(),
+                  restaurantId,
+                  printerId,
+                  orderId,
+                  trigger: 'kitchen',
+                }),
+              },
+            ],
+          });
+
+          log.info(
+            { restaurantId, orderId, printerId, printJobId: printJob._id.toString() },
+            'Kitchen print job created and published',
+          );
+        } catch (printerErr) {
+          log.error({ err: printerErr, restaurantId, orderId, printerId }, 'Failed to create kitchen print job for printer');
+        }
+      }
+    } catch (err) {
+      log.error({ err, restaurantId, orderId }, 'Kitchen print trigger failed — order flow continues');
     }
   }
 

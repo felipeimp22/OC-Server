@@ -356,7 +356,7 @@ order.completed / order.status_changed → 'ready'|'out_for_delivery'|'delivered
          → PrintJobConsumer picks up the job → formats receipt → sends email to printer
 ```
 
-**Print job Kafka message payload:**
+**Print job Kafka message payload (auto-print):**
 ```json
 {
   "printJobId": "67abc123...",
@@ -364,6 +364,40 @@ order.completed / order.status_changed → 'ready'|'out_for_delivery'|'delivered
   "printerId": "67abc789...",
   "orderId": "67abcdef...",
   "trigger": "auto"
+}
+```
+
+### Kitchen Print Event Flow
+
+When an order status changes to `preparing`, kitchen ticket printing is triggered for kitchen-type printers:
+
+```
+order.status_changed → newStatus === 'preparing'
+  → OrderEventConsumer.handleOrderStatusChanged()
+    → triggerKitchenPrint(restaurantId, orderId, orderType)
+      1. PrinterSettings check: enabled=true (master toggle only)
+      2. Find enabled kitchen printers (type='kitchen') matching order type
+      3. For each kitchen printer:
+         - Create PrintJob (status='queued', trigger='kitchen')
+         - Publish to print.jobs Kafka topic
+         → PrintJobConsumer picks up the job → formats kitchen ticket → sends email to printer
+```
+
+**Kitchen ticket format differs from customer receipt:**
+- LARGE order number header (28px, prominent)
+- Order type badge (pickup/delivery/dine-in)
+- Items with quantities, modifiers, and special instructions
+- NO pricing information
+- Timestamp in restaurant timezone
+
+**Kitchen print Kafka message payload:**
+```json
+{
+  "printJobId": "67abc123...",
+  "restaurantId": "67abc456...",
+  "printerId": "67abc789...",
+  "orderId": "67abcdef...",
+  "trigger": "kitchen"
 }
 ```
 
