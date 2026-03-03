@@ -846,6 +846,26 @@ Generates a receipt preview using a sample order and the restaurant's real name/
 - Calculates subtotal, tax (7%), processing fee (2.9% + 30¢), delivery fee ($4.99 for delivery orders), and 18% tip
 - Uses the real restaurant data from DB for restaurant name/address; resolves timezone from store_hours
 
+### Receipt Preview UI
+
+**Component:** `oc-restaurant-manager/components/settings/printer/ReceiptPreview.tsx`
+
+The Receipt Preview section in Printer Settings lets restaurant owners see exactly how printed receipts will look. It calls the `POST /api/v1/printers/preview` endpoint via the `getReceiptPreview` server action.
+
+**Controls:**
+- **Item count slider** (1-15) — simulates different order sizes
+- **Order type selector** — Pickup / Delivery / Dine-In
+- **Font size selector** — Small / Normal / Large (syncs with printer settings)
+- **Save Font Size** button — persists the selected font size to PrinterSettings
+
+**Preview panel:** Rendered receipt in a sandboxed `<iframe srcDoc={html}>` at 576px width (Star Micronics spec). Auto-resizes to content height. Shows loading spinner during fetch.
+
+**Debouncing:** Control changes are debounced 300ms before fetching a new preview to avoid excessive API calls.
+
+**Server action:** `getReceiptPreview(restaurantId, { itemCount, orderType, fontSize })` in `printer.actions.ts`.
+
+**i18n keys:** Added under `settings.printer` namespace in en/es/pt: `receiptPreview`, `receiptPreviewDescription`, `itemCount`, `smallOrder`, `mediumOrder`, `largeOrder`, `fontSize`, `fontSizeSmall`, `fontSizeNormal`, `fontSizeLarge`, `saveFontSize`, `fontSizeSaved`, `orderTypeLabel`, `previewLoading`, `previewError`.
+
 ## Email-Based Print Delivery
 
 **File:** `src/services/PrintDeliveryService.ts`
