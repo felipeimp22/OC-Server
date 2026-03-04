@@ -162,7 +162,7 @@ export class CommunicationService {
         () =>
           provider.sendEmail({
             to: validTo,
-            from: env.EMAIL_FROM_ADDRESS ?? `noreply@${env.EMAIL_DOMAIN}`,
+            from: env.EMAIL_FROM_ADDRESS ?? 'OrderChop <noreply@orderchop.com>',
             subject,
             html: body,
             metadata: {

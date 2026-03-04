@@ -38,7 +38,7 @@ export class MailgunProvider implements IEmailProvider {
     const subject = options.subject;
 
     const formData = new URLSearchParams();
-    formData.append('from', options.from ?? 'noreply@orderchop.com');
+    formData.append('from', options.from ?? 'OrderChop <noreply@orderchop.com>');
     formData.append('to', to);
     formData.append('subject', subject);
     formData.append('html', options.html);

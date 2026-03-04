@@ -28,6 +28,10 @@ export interface PrintDeliveryResult {
   error?: string;
   /** Whether the error is retryable (network/5xx) or permanent (4xx/auth) */
   retryable?: boolean;
+  /** Recipient email (included in test print results for debugging) */
+  to?: string;
+  /** Sender email (included in test print results for debugging) */
+  from?: string;
 }
 
 export class PrintDeliveryService {
@@ -142,6 +146,7 @@ export class PrintDeliveryService {
       {
         printerId: printer._id.toString(),
         to: printer.email,
+        from: fromAddress,
       },
       'Sending test print',
     );
@@ -163,11 +168,13 @@ export class PrintDeliveryService {
         {
           printerId: printer._id.toString(),
           messageId: result.messageId,
+          to: printer.email,
+          from: fromAddress,
         },
         'Test print sent successfully',
       );
 
-      return { success: true, messageId: result.messageId };
+      return { success: true, messageId: result.messageId, to: printer.email, from: fromAddress };
     } catch (err) {
       const error = err as { response?: { status?: number }; message?: string };
       const errorMessage = error.message ?? 'Unknown error';

@@ -241,7 +241,7 @@ export async function printerRoutes(app: FastifyInstance): Promise<void> {
     if (!result.success) {
       return reply.code(502).send({ error: result.error ?? 'Test print failed' });
     }
-    return { success: true, messageId: result.messageId };
+    return { success: true, messageId: result.messageId, to: result.to, from: result.from };
   });
 
   // POST /api/v1/printers/orders/:orderId/print — Manually trigger print for an order
